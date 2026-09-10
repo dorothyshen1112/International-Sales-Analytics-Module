@@ -9,8 +9,8 @@ st.markdown("""
     <style>
     .stApp { background-color: #FFFFFF; color: #2D3436; }
     .stMetric { background-color: #F8F9FA; border-radius: 10px; padding: 15px; border: 1px solid #E9ECEF; }
+    [data-testid="stMetricValue"] { font-size: 1.8rem !important; }
     h1, h2, h3 { color: #0984E3; font-family: 'Helvetica Neue', sans-serif; }
-    div.stTabs [data-baseweb="tab-list"] { gap: 15px; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -53,7 +53,9 @@ def process_data(df):
     df['醫師酬勞針'] = 0
     df['市場贊助與樣品'] = 0
     df['客訴補償'] = 0
-    is_foc = (df[c_price] == 0) | (df[c_amount] == 0)
+    
+    # 只要單價=0 或 金額=0 就判定為 FOC 候選
+    is_foc_item = (df[c_price] == 0) | (df[c_amount] == 0)
     
     kw_dict = {
         '培訓與實操用針': 'Workshop|實操|示範|培訓|講義|Demo',
@@ -63,7 +65,7 @@ def process_data(df):
     }
     
     for key, kw in kw_dict.items():
-        df.loc[is_foc & df['主要備註'].str.contains(kw, na=False, case=False), key] = df[c_qty]
+        df.loc[is_foc_item & df['主要備註'].str.contains(kw, na=False, case=False), key] = df[c_qty]
 
     return df, {
         'date': c_date, 'country': c_country, 'customer': c_customer,
@@ -86,78 +88,83 @@ if uploaded_file:
     raw_df = pd.read_excel(uploaded_file)
     df, m = process_data(raw_df)
     
-    # KPI 摘要
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric("累積營收 (TWD)", f"NT${df[m['amount']].sum():,.0f}")
-    k2.metric("總出口件數", f"{df[m['qty']].sum():,.0f}")
+    # --- 頂部指標卡片 (5欄位) ---
+    k1, k2, k3, k4, k5 = st.columns(5)
+    
+    # 累積營收
+    total_revenue = df[m['amount']].sum()
+    k1.metric("累積營收 (TWD)", f"NT${total_revenue:,.0f}")
+    
+    # 總出口 (Paid + FOC)
+    total_export = df[m['qty']].sum()
+    k2.metric("總出口件數", f"{total_export:,.0f}")
+    
+    # 訂單數量 (僅限有金額的)
+    paid_qty = df[df[m['amount']] > 0][m['qty']].sum()
+    k3.metric("訂單數量 (收費)", f"{paid_qty:,.0f}")
+    
+    # FOC 總量
     foc_cols = ['培訓與實操用針', '醫師酬勞針', '市場贊助與樣品', '客訴補償']
-    k3.metric("FOC 總數量", f"{df[foc_cols].sum().sum():,.0f}")
-    k4.metric("活躍國家數", f"{df[m['country']].nunique()}")
+    foc_sum = df[foc_cols].sum().sum()
+    k4.metric("FOC 總數量", f"{foc_sum:,.0f}")
+    
+    # 國家數
+    k5.metric("活躍國家數", f"{df[m['country']].nunique()}")
 
     # --- 核心分頁 ---
-    tabs = st.tabs(["🌍 市場對比分析", "🎯 產品分析", "📉 FOC 追蹤", "👤 客戶價值", "⚡ 營運效率", "🔍 數據查詢"])
+    tabs = st.tabs(["🌍 市場對比分析", "🎯 產品分析", "📉 FOC 專項", "⚡ 營運效率", "🔍 數據查詢"])
     
-    with tabs[0]: # 修改為強大的「跨維度對比模組」
+    with tabs[0]: # 跨維度對比
         st.subheader("📈 跨年度與市場綜合對比")
-        
-        # 篩選控制項
         c1, c2, c3 = st.columns([1, 1, 2])
-        compare_metric = c1.selectbox("選擇分析指標", ["銷售金額 (台幣)", "出口數量"], index=0)
-        target_col = m['amount'] if compare_metric == "銷售金額 (台幣)" else m['qty']
+        compare_metric = c1.selectbox("選擇分析指標", ["銷售金額 (台幣)", "收費訂單數量", "總出口件數"])
         
-        selected_years = c2.multiselect("選擇年度 (可多選進行比較)", options=sorted(df['年度'].dropna().unique()), default=df['年度'].dropna().unique()[-2:])
-        selected_countries = c3.multiselect("選擇國家", options=df[m['country']].unique(), default=df[m['country']].unique()[:3])
+        # 指標邏輯切換
+        if compare_metric == "銷售金額 (台幣)":
+            target_col = m['amount']
+            plot_df = df[df[m['amount']] > 0]
+        elif compare_metric == "收費訂單數量":
+            target_col = m['qty']
+            plot_df = df[df[m['amount']] > 0]
+        else:
+            target_col = m['qty']
+            plot_df = df
+            
+        selected_years = c2.multiselect("年度", options=sorted(df['年度'].dropna().unique()), default=df['年度'].dropna().unique()[-2:])
+        selected_countries = c3.multiselect("國家", options=df[m['country']].unique(), default=df[m['country']].unique()[:3])
         
-        # 數據過濾
-        comp_df = df[(df['年度'].isin(selected_years)) & (df[m['country']].isin(selected_countries))]
+        comp_df = plot_df[(plot_df['年度'].isin(selected_years)) & (plot_df[m['country']].isin(selected_countries))]
         
         if not comp_df.empty:
-            # 1. 柱狀對比圖
             fig_compare = px.bar(comp_df.groupby(['年度', m['country']])[target_col].sum().reset_index(), 
                                  x=m['country'], y=target_col, color='年度', barmode='group',
-                                 text_auto='.2s', title=f"{compare_metric} - 年度對比圖")
+                                 text_auto='.2s', title=f"{compare_metric} 對比")
             st.plotly_chart(fig_compare, use_container_width=True)
             
-            # 2. 數據表格與成長率計算
-            st.write("#### 數據摘要與 YoY 成長率分析")
+            # YoY 表格
             pivot_df = comp_df.pivot_table(index=m['country'], columns='年度', values=target_col, aggfunc='sum').fillna(0)
-            
-            # 計算成長率 (如果至少有兩年數據)
             if len(selected_years) >= 2:
-                latest_yr = max(selected_years)
-                prev_yr = sorted(selected_years)[-2]
-                pivot_df['成長率 (%)'] = ((pivot_df[latest_yr] - pivot_df[prev_yr]) / pivot_df[prev_yr] * 100).replace([np.inf, -np.inf], 0).fillna(0)
-            
-            st.table(pivot_df.style.format("{:,.0f}").background_gradient(cmap='Blues'))
-
-    with tabs[1]: # 產品分析
-        st.subheader("產品熱銷排名 (台幣金額)")
-        p_df = df[df[m['amount']] > 0].groupby(m['product'])[m['amount']].sum().sort_values(ascending=False).reset_index().head(12)
-        fig_p = px.bar(p_df, x=m['amount'], y=m['product'], orientation='h', color=m['product'], title="熱銷產品 Top 12")
-        st.plotly_chart(fig_p, use_container_width=True)
+                pivot_df['成長率 (%)'] = ((pivot_df[max(selected_years)] - pivot_df[sorted(selected_years)[-2]]) / pivot_df[sorted(selected_years)[-2]] * 100).replace([np.inf, -np.inf], 0).fillna(0)
+            st.table(pivot_df.style.format("{:,.0f}"))
 
     with tabs[2]: # FOC 專項
-        st.subheader("FOC 資源配置原因 (BX欄位識別)")
+        st.subheader("FOC 資源分配細目")
         f_summary = df[foc_cols].sum().reset_index()
         f_summary.columns = ['類別', '數量']
         fig_f = px.bar(f_summary, x='類別', y='數量', color='類別', text_auto=True)
         st.plotly_chart(fig_f, use_container_width=True)
-        st.dataframe(df[df[foc_cols].sum(axis=1) > 0][[m['date'], m['country'], m['customer'], m['product'], m['qty'], '主要備註']], use_container_width=True)
+        # 顯示明細
+        st.write("#### FOC 識別明細 (來源：BX 欄位)")
+        foc_detail = df[df[foc_cols].sum(axis=1) > 0]
+        st.dataframe(foc_detail[[m['date'], m['country'], m['customer'], m['product'], m['qty'], '主要備註']], use_container_width=True)
 
-    with tabs[4]: # 營運效率 (AOV)
-        st.subheader("營運效率指標 (平均客單價)")
-        df['AOV'] = df[m['amount']] / df[m['qty']]
-        aov_data = df[df[m['amount']]>0].groupby(m['country'])['AOV'].mean().reset_index()
-        fig_aov = px.bar(aov_data, x=m['country'], y='AOV', title="各國平均每件針劑台幣價值")
-        st.plotly_chart(fig_aov, use_container_width=True)
-
-    with tabs[5]: # 查詢
+    with tabs[4]: # 數據查詢
         st.subheader("🔍 同仁自助查詢")
-        search_q = st.text_input("輸入關鍵字搜尋...")
+        search_q = st.text_input("輸入關鍵字搜尋 (客戶或品名)...")
         q_df = df
         if search_q:
             q_df = q_df[q_df[m['customer']].str.contains(search_q, na=False) | q_df[m['product']].str.contains(search_q, na=False)]
         st.dataframe(q_df[[m['date'], m['country'], m['customer'], m['product'], m['qty'], m['amount'], '主要備註']], use_container_width=True)
 
 else:
-    st.info("💡 請管理員從左側側邊欄導入 ERP Excel 數據以開啟分析。")
+    st.info("💡 請管理員從左側導入數據。")
