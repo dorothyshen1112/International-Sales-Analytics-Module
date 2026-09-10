@@ -4,7 +4,7 @@ import plotly.express as px
 import numpy as np
 
 # --- 1. 頁面配置 ---
-st.set_page_config(page_title="雙美全球銷售分析系統", layout="wide")
+st.set_page_config(page_title="双美全球銷售數據系統", layout="wide")
 st.markdown("""
     <style>
     .stApp { background-color: #FFFFFF; color: #2D3436; }
@@ -15,11 +15,11 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- 2. 智慧資料正規化引擎 (強化防錯版) ---
+# --- 2. 智慧資料正規化引擎 ---
 def smart_normalize(df):
     if df.empty: return pd.DataFrame()
     
-    # 預抓 BX 欄位 (第76欄)
+    # 抓取 BX 欄位 (第 76 欄) 作為優先備註
     bx_note = df.iloc[:, 75].astype(str).replace('nan', '') if df.shape[1] >= 76 else None
     
     # 清理欄位名稱：轉大寫、去空格
@@ -43,7 +43,6 @@ def smart_normalize(df):
 
     p_df = pd.DataFrame()
     
-    # 安全提取函數
     def safe_get(key, is_num=False):
         col = find_best(mapping[key])
         if col:
@@ -52,14 +51,13 @@ def smart_normalize(df):
             return df[col]
         return 0 if is_num else None
 
-    # 開始填充標準化表格
     c_date_col = find_best(mapping['DATE'])
     p_df['銷貨日期'] = pd.to_datetime(df[c_date_col], errors='coerce') if c_date_col else pd.Timestamp.now()
     
     raw_country = safe_get('COUNTRY')
     p_df['國家'] = raw_country.fillna('台灣').astype(str) if raw_country is not None else '台灣'
     
-    # 區域劃分邏輯 (台灣/中國/海外)
+    # 區域分群
     def classify_region(c):
         c_str = str(c).strip()
         if c_str in ['台灣', '臺灣', 'TAIWAN']: return '台灣市場'
@@ -71,13 +69,13 @@ def smart_normalize(df):
     p_df['客戶'] = raw_cust.fillna('未知客戶') if raw_cust is not None else '未知客戶'
     
     raw_prod = safe_get('PRODUCT')
+    # 產品合併邏輯
     p_df['產品'] = raw_prod.astype(str).str.replace('Sunmax DeusaDerm', 'Sunmax Deusaderm VITAL', case=False) if raw_prod is not None else "未知產品"
     
     p_df['數量'] = safe_get('QTY', True)
     p_df['單價'] = safe_get('PRICE', True)
     p_df['金額'] = safe_get('AMOUNT', True)
     
-    # 備註處理
     if bx_note is not None and bx_note.str.len().sum() > 0:
         p_df['備註'] = bx_note
     else:
@@ -106,46 +104,32 @@ def smart_normalize(df):
 
 # --- 3. 側邊欄 ---
 with st.sidebar:
-    st.title("⚙️ 數據管理")
-    admin_mode = st.toggle("管理員模式 (導入數據)")
+    st.title("⚙️ 數據導入")
+    admin_mode = st.toggle("管理員模式")
     uploaded_file = None
     if admin_mode:
         pwd = st.text_input("管理密碼", type="password")
         if pwd == "sunmax888":
             uploaded_file = st.file_uploader("上傳 Excel", type=["xlsx"])
 
-st.title("📊 雙美全球銷售數據指揮中心")
+# --- 關鍵修正 1：修改標題 ---
+st.title("📊 双美全球銷售數據")
 
 if uploaded_file:
-    # 讀取所有 Sheet
     all_sheets = pd.read_excel(uploaded_file, sheet_name=None)
-    all_data_list = []
-    for name, df_temp in all_sheets.items():
-        if not df_temp.empty:
-            norm_df = smart_normalize(df_temp)
-            if not norm_df.empty:
-                all_data_list.append(norm_df)
-    
-    if not all_data_list:
-        st.error("❌ 檔案內容為空或無法辨識欄位。")
-        st.stop()
-        
+    all_data_list = [smart_normalize(df_temp) for name, df_temp in all_sheets.items() if not df_temp.empty]
     df_all = pd.concat(all_data_list, ignore_index=True)
     
-    # --- 關鍵修正：解決篩選連動 BUG ---
-    st.info("💡 數據已整合。請設定下方條件進行分析：")
+    # 頂部篩選器
+    st.info("💡 篩選下方條件，指標與圖表將同步更新：")
     sc1, sc2, sc3 = st.columns([1, 1, 2])
-    
-    # A. 區域選擇 (台灣/中國/海外)
     area_options = ['台灣市場', '中國市場', '海外市場']
     sel_area = sc1.multiselect("🏙️ 區域", options=area_options, default=['海外市場', '中國市場'])
     
-    # B. 根據區域動態更新國家清單
     filtered_by_area = df_all[df_all['市場區域'].isin(sel_area)]
     available_countries = sorted(filtered_by_area['國家'].unique())
     sel_countries = sc3.multiselect("📍 國家", options=available_countries, default=available_countries)
     
-    # C. 年度選擇
     yrs = sorted([int(y) for y in df_all['年度'].dropna().unique()])
     sel_yrs = sc2.multiselect("📅 年度", yrs, default=yrs[-2:] if len(yrs)>1 else yrs)
 
@@ -153,6 +137,10 @@ if uploaded_file:
     df = df_all[(df_all['年度'].isin(sel_yrs)) & (df_all['國家'].isin(sel_countries)) & (df_all['市場區域'].isin(sel_area))]
 
     if not df.empty:
+        # --- 關鍵修正 2：明確顯示指標計算區間 ---
+        yr_str = ", ".join(map(str, sorted(sel_yrs)))
+        st.write(f"🔍 **目前數據統計區間：{yr_str}** (以下指標為所選年度之總和)")
+
         # KPI 卡片
         k1, k2, k3, k4, k5 = st.columns(5)
         k1.metric("總銷售金額", f"NT${df['金額'].sum():,.0f}")
@@ -164,16 +152,14 @@ if uploaded_file:
 
         tabs = st.tabs(["📊 市場佔比與YoY", "🎯 產品排行", "📉 FOC 專項", "⚡ 營運效率", "🔍 明細查詢"])
 
-        with tabs[0]: # 市場成長與佔比
-            yr_str = ", ".join(map(str, sel_yrs))
+        with tabs[0]: 
             st.subheader(f"🌍 全球市場權重分析 ({yr_str})")
             metric_opt = st.selectbox("選擇分析指標", ["銷售金額", "收費訂單數量", "FOC 總數量"])
             m_col = {'銷售金額': '金額', '收費訂單數量': '收費量', 'FOC 總數量': 'FOC總量'}[metric_opt]
             
             c1, c2 = st.columns(2)
-            c1.plotly_chart(px.pie(df.groupby('國家')[m_col].sum().reset_index(), values=m_col, names='國家', hole=0.4, title=f"{yr_str} 各國份額", color_discrete_sequence=px.colors.qualitative.Pastel), use_container_width=True)
+            c1.plotly_chart(px.pie(df.groupby('國家')[m_col].sum().reset_index(), values=m_col, names='國家', hole=0.4, title=f"各國 {metric_opt} 佔比", color_discrete_sequence=px.colors.qualitative.Pastel), use_container_width=True)
             
-            # YoY 表格
             pivot_df = df.pivot_table(index='國家', columns='年度', values=m_col, aggfunc='sum').fillna(0)
             sorted_cols = sorted(pivot_df.columns)
             for i in range(1, len(sorted_cols)):
@@ -204,8 +190,7 @@ if uploaded_file:
             ec1, ec2 = st.columns(2)
             eff_df = df.groupby('國家').agg({'收費量':'sum', 'FOC總量':'sum'}).reset_index()
             eff_df['轉換率'] = eff_df['收費量'] / (eff_df['FOC總量'] + 0.001)
-            ec1.plotly_chart(px.bar(eff_df.sort_values('轉換率', ascending=False), x='國家', y='轉換率', title="FOC 投資轉換率 (每支贈針換回訂單量)", color='轉換率'), use_container_width=True)
-            
+            ec1.plotly_chart(px.bar(eff_df.sort_values('轉換率', ascending=False), x='國家', y='轉換率', title="FOC 投資轉換率 (每支贈針換回收費訂單量)", color='轉換率'), use_container_width=True)
             area_rev = df.groupby('市場區域')['金額'].sum().reset_index()
             ec2.plotly_chart(px.pie(area_rev, values='金額', names='市場區域', title="全球區域營收佔比", hole=0.5), use_container_width=True)
 
@@ -218,4 +203,4 @@ if uploaded_file:
     else:
         st.warning("⚠️ 此篩選條件下無數據。")
 else:
-    st.info("👋 管理員您好，請上傳包含「新/舊系統」工作表的 Excel 檔案。系統會自動進行跨系統整合與連動分析。")
+    st.info("👋 管理員您好，請上傳 Excel 檔案。系統會自動進行跨系統整合與連動分析。")
