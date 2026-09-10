@@ -13,19 +13,16 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- 2. 核心數據處理 ---
+# --- 2. 數據處理 ---
 def process_data(df):
-    # BX 欄位抓取 (第 76 欄)
     if df.shape[1] >= 76:
         raw_note = df.iloc[:, 75].astype(str).replace('nan', '')
     else:
         raw_note = df.iloc[:, -1].astype(str).replace('nan', '')
 
-    # 清理欄位空格
     df.columns = [str(c).replace(' ', '').replace('\n', '') for c in df.columns]
     df['主要備註'] = raw_note
 
-    # 自動匹配欄位
     def find_col(targets):
         for t in targets:
             if t in df.columns: return t
@@ -39,7 +36,6 @@ def process_data(df):
     c_price = find_col(['單價'])
     c_amount = find_col(['本幣未稅金額', '本幣合計'])
 
-    # 數據清洗
     df[c_date] = pd.to_datetime(df[c_date], errors='coerce')
     df['年度'] = df[c_date].dt.year
     df['月份'] = df[c_date].dt.month
@@ -47,7 +43,7 @@ def process_data(df):
     for c in [c_qty, c_price, c_amount]:
         df[c] = pd.to_numeric(df[c].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
 
-    # --- 需求 3：產品名稱合併 ---
+    # 產品名稱合併
     df[c_product] = df[c_product].replace('Sunmax DeusaDerm', 'Sunmax Deusaderm VITAL')
 
     # FOC 自動分類
@@ -89,15 +85,14 @@ if uploaded_file:
     raw_df = pd.read_excel(uploaded_file)
     df_all, m = process_data(raw_df)
     
-    # --- 需求 2：全域置頂篩選器 ---
+    # 全域篩選器
     st.info("請設定下方篩選條件以連動所有分析分頁：")
     sc1, sc2 = st.columns([1, 2])
     available_years = sorted([int(y) for y in df_all['年度'].dropna().unique()])
-    selected_years = sc1.multiselect("📅 選擇分析年度", options=available_years, default=available_years[-2:])
+    selected_years = sc1.multiselect("📅 選擇分析年度", options=available_years, default=available_years)
     available_countries = sorted(df_all[m['country']].unique())
     selected_countries = sc2.multiselect("📍 選擇分析國家", options=available_countries, default=available_countries)
 
-    # 應用篩選
     df = df_all[(df_all['年度'].isin(selected_years)) & (df_all[m['country']].isin(selected_countries))]
 
     if df.empty:
@@ -111,61 +106,70 @@ if uploaded_file:
         k4.metric("FOC 總量", f"{df['FOC總數量'].sum():,.0f}")
         k5.metric("國家數", f"{df[m['country']].nunique()}")
 
-        # 分頁系統
-        tabs = st.tabs(["🌍 市場成長對比", "🎯 產品分析", "📉 FOC 專項", "⚡ 營運效率", "🔍 原始數據"])
+        tabs = st.tabs(["🌍 市場成長對比", "🎯 產品分析", "📉 FOC 專項", "⚡ 營運效率", "🔍 數據明細"])
 
-        with tabs[0]: # 市場對比
-            st.subheader("📈 跨年度指標對比與 YoY %")
-            # 需求 1：指標加入 FOC
+        with tabs[0]: 
+            st.subheader("📈 跨年度與市場綜合成長趨勢")
             compare_metric = st.selectbox("選擇分析指標", ["銷售金額 (台幣)", "收費訂單數量", "總出口件數", "FOC 總數量"])
             metric_map = {"銷售金額 (台幣)": m['amount'], "收費訂單數量": m['qty'], "總出口件數": m['qty'], "FOC 總數量": "FOC總數量"}
             target_col = metric_map[compare_metric]
 
-            chart_data = df.groupby(['年度', m['country']])[target_col].sum().reset_index()
-            fig = px.bar(chart_data, x=m['country'], y=target_col, color='年度', barmode='group', text_auto='.2s', title=f"{compare_metric} 年度比較")
+            # 1. 趨勢圖
+            fig = px.bar(df.groupby(['年度', m['country']])[target_col].sum().reset_index(), 
+                         x=m['country'], y=target_col, color='年度', barmode='group', text_auto='.2s', title="年度指標對比圖")
             st.plotly_chart(fig, use_container_width=True)
 
-            # 計算 YoY
-            st.write("#### 數據摘要與成長分析")
+            # 2. 升級版：多年度 YoY 計算邏輯
+            st.write("#### 逐年成長趨勢摘要 (YoY %)")
             pivot_df = df.pivot_table(index=m['country'], columns='年度', values=target_col, aggfunc='sum').fillna(0)
             
-            if len(selected_years) >= 2:
-                latest, prev = max(selected_years), sorted(selected_years)[-2]
-                pivot_df['成長率(%)'] = ((pivot_df[latest] - pivot_df[prev]) / pivot_df[prev] * 100).replace([np.inf, -np.inf], 0).fillna(0)
-                
-                # 安全的染色函數 (相容新版 Pandas)
-                def color_logic(val):
-                    if isinstance(val, (int, float)):
-                        return 'color: green' if val > 0 else 'color: red' if val < 0 else 'color: black'
-                    return ''
-                
-                st.dataframe(pivot_df.style.format("{:,.1f}").apply(lambda x: [color_logic(v) if x.name == '成長率(%)' else '' for v in x]))
-            else:
-                st.dataframe(pivot_df.style.format("{:,.0f}"))
+            # 動態建立成長率欄位
+            display_df = pivot_df.copy()
+            sorted_cols = sorted(pivot_df.columns)
+            
+            for i in range(1, len(sorted_cols)):
+                curr_yr = sorted_cols[i]
+                prev_yr = sorted_cols[i-1]
+                growth_col_name = f"{curr_yr} 成長率(%)"
+                # 計算成長率
+                display_df[growth_col_name] = ((pivot_df[curr_yr] - pivot_df[prev_yr]) / pivot_df[prev_yr] * 100).replace([np.inf, -np.inf], 0).fillna(0)
+            
+            # 重新排列欄位順序：年度1, 年度2, 年度2成長%, 年度3, 年度3成長%
+            final_cols = []
+            for i, yr in enumerate(sorted_cols):
+                final_cols.append(yr)
+                growth_name = f"{yr} 成長率(%)"
+                if growth_name in display_df.columns:
+                    final_cols.append(growth_name)
+            
+            display_df = display_df[final_cols]
 
-        with tabs[1]: # 產品分析 (自動連動年份)
-            st.subheader(f"🎯 產品銷售排名 ({selected_years}年)")
-            rank_col = m['amount'] if df[m['amount']].sum() > 0 else m['qty']
-            p_df = df.groupby(m['product'])[rank_col].sum().sort_values(ascending=False).reset_index().head(12)
-            fig_p = px.bar(p_df, x=rank_col, y=m['product'], orientation='h', color=rank_col, title="Top 12 產品熱銷榜")
-            st.plotly_chart(fig_p, use_container_width=True)
+            # 染色與格式化
+            def style_growth(val, column_name):
+                if '成長率' in str(column_name):
+                    color = 'green' if val > 0 else 'red' if val < 0 else 'black'
+                    return f'color: {color}; font-weight: bold'
+                return ''
 
-        with tabs[2]: # FOC 專項 (自動連動年份)
-            st.subheader(f"📉 FOC 原因分佈 ({selected_years}年)")
-            f_cols = ['培訓與實操用針', '醫師酬勞針', '市場贊助與樣品', '客訴補償']
-            f_sum = df[f_cols].sum().reset_index()
+            st.dataframe(display_df.style.format("{:,.1f}").apply(lambda x: [style_growth(v, x.name) for v in x], axis=0))
+            st.caption("註：成長率計算方式為：(當年度 - 前一年度) / 前一年度 * 100%")
+
+        with tabs[1]: # 產品分析
+            p_rank_col = m['amount'] if df[m['amount']].sum() > 0 else m['qty']
+            p_df = df.groupby(m['product'])[p_rank_col].sum().sort_values(ascending=False).reset_index().head(12)
+            st.plotly_chart(px.bar(p_df, x=p_rank_col, y=m['product'], orientation='h', color=p_rank_col, title="Top 12 產品熱銷榜"), use_container_width=True)
+
+        with tabs[2]: # FOC 專項
+            f_sum = df[['培訓與實操用針', '醫師酬勞針', '市場贊助與樣品', '客訴補償']].sum().reset_index()
             f_sum.columns = ['類別', '數量']
-            st.plotly_chart(px.bar(f_sum, x='類別', y='數量', color='類別', text_auto=True), use_container_width=True)
+            st.plotly_chart(px.bar(f_sum, x='類別', y='數量', color='類別', text_auto=True, title="FOC 分析摘要"), use_container_width=True)
             st.dataframe(df[df['FOC總數量']>0][[m['date'], m['country'], m['customer'], m['product'], m['qty'], '主要備註']], use_container_width=True)
 
-        with tabs[3]: # 營運效率 (自動連動年份)
-            st.subheader("⚡ 營運效率 (AOV)")
+        with tabs[3]: # 營運效率
             paid_df = df[df[m['amount']] > 0].copy()
             if not paid_df.empty:
                 paid_df['AOV'] = paid_df[m['amount']] / paid_df[m['qty']]
-                st.plotly_chart(px.bar(paid_df.groupby(m['country'])['AOV'].mean().reset_index(), x=m['country'], y='AOV', color='AOV', title="各國平均客單價"), use_container_width=True)
-            else:
-                st.warning("無付費訂單數據。")
+                st.plotly_chart(px.bar(paid_df.groupby(m['country'])['AOV'].mean().reset_index(), x=m['country'], y='AOV', color='AOV', title="各國平均收費單價 (AOV)"), use_container_width=True)
 
         with tabs[4]: # 原始數據
             search_q = st.text_input("搜尋客戶或品名...").lower()
