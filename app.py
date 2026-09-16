@@ -20,12 +20,11 @@ st.markdown("""
 def smart_normalize(df):
     if df.empty: return pd.DataFrame()
     
-    # 抓取 BX 欄位 (第 76 欄) 作為優先備註
+    # 抓取 BX 欄位 (第 76 欄) 作為優先備註來源
     bx_note_series = None
     if df.shape[1] >= 76:
         bx_note_series = df.iloc[:, 75].astype(str).replace('nan', '')
     
-    # 清理欄位名稱
     df.columns = [str(c).replace(' ', '').replace('\n', '').upper() for c in df.columns]
     
     mapping = {
@@ -58,8 +57,8 @@ def smart_normalize(df):
     c_date_col = find_best_col(mapping['DATE'])
     p_df['銷貨日期'] = pd.to_datetime(df[c_date_col], errors='coerce') if c_date_col else pd.Timestamp.now()
     p_df['年度'] = p_df['銷貨日期'].dt.year.fillna(0).astype(int)
-    
     p_df['國家'] = safe_get_series('COUNTRY').fillna('台灣').astype(str)
+    
     def classify_region(c):
         c_str = str(c).strip()
         if c_str in ['台灣', '臺灣', 'TAIWAN']: return '台灣市場'
@@ -68,7 +67,10 @@ def smart_normalize(df):
     p_df['市場區域'] = p_df['國家'].apply(classify_region)
     
     p_df['客戶'] = safe_get_series('CUSTOMER').fillna('未知客戶').astype(str)
-    p_df['產品'] = safe_get_series('PRODUCT').astype(str).str.replace('Sunmax DeusaDerm', 'Sunmax Deusaderm VITAL', case=False)
+    # 修正產品名稱重複 VITAL 的問題
+    raw_prod = safe_get_series('PRODUCT').astype(str)
+    p_df['產品'] = raw_prod.str.replace('Sunmax DeusaDerm', 'Sunmax Deusaderm VITAL', case=False).str.replace('VITAL VITAL', 'VITAL', case=False)
+    
     p_df['數量'] = safe_get_series('QTY', True)
     p_df['贈品量_單獨欄位'] = safe_get_series('GIFT_QTY', True)
     p_df['單價'] = safe_get_series('PRICE', True)
@@ -79,8 +81,8 @@ def smart_normalize(df):
     else:
         p_df['備註'] = safe_get_series('NOTE').astype(str).replace('nan', '')
 
-    # --- FOC 核心邏輯 (細化分類) ---
-    p_df['實際FOC總量'] = np.where((p_df['單價'] <= 0) | (p_df['金額'] <= 0), p_df['數量'], 0) + p_df['贈品量_單獨欄位']
+    # --- FOC 核心邏輯 (全量捕捉 + 標籤分類) ---
+    p_df['實際FOC數量'] = np.where((p_df['單價'] <= 0) | (p_df['金額'] <= 0), p_df['數量'], 0) + p_df['贈品量_單獨欄位']
     
     kw = {
         'Workshop Training': 'Workshop|實操|示範|培訓|教學|手法|Demo',
@@ -90,20 +92,27 @@ def smart_normalize(df):
         '客訴補償': 'complaints|客訴|補償|瑕疵|更換|quality'
     }
     
+    p_df['FOC類別'] = '非FOC'
     for label in kw.keys(): p_df[label] = 0
     p_df['其他待分類FOC'] = 0
 
     def do_classify(row):
-        f_qty = row['實際FOC總量']
+        f_qty = row['實際FOC數量']
         if f_qty <= 0: return row
-        matched = False
+        
+        matched_label = None
         rem = str(row['備註'])
         for label, pat in kw.items():
             if re.search(pat, rem, re.IGNORECASE):
                 row[label] = f_qty
-                matched = True
+                matched_label = label
                 break
-        if not matched: row['其他待分類FOC'] = f_qty
+        
+        if matched_label:
+            row['FOC類別'] = matched_label
+        else:
+            row['其他待分類FOC'] = f_qty
+            row['FOC類別'] = '其他待分類FOC'
         return row
     
     p_df = p_df.apply(do_classify, axis=1)
@@ -120,7 +129,7 @@ with st.sidebar:
     if admin_mode:
         pwd = st.text_input("管理密碼", type="password")
         if pwd == "sunmax888":
-            uploaded_file = st.file_uploader("上傳 Excel (支援多 Sheet)", type=["xlsx"])
+            uploaded_file = st.file_uploader("上傳 Excel", type=["xlsx"])
 
 st.title("📊 双美全球銷售數據")
 
@@ -136,7 +145,7 @@ if uploaded_file:
     available_countries = sorted(filtered_by_area['國家'].unique())
     sel_countries = sc3.multiselect("📍 國家", options=available_countries, default=available_countries)
     available_yrs = sorted([int(y) for y in df_all['年度'].dropna().unique() if y > 0])
-    sel_yrs = sc2.multiselect("📅 年度", available_yrs, default=available_yrs[-2:] if len(available_yrs)>1 else available_yrs)
+    sel_yrs = sc2.multiselect("📅 年度", available_yrs, default=available_yrs)
 
     df = df_all[(df_all['年度'].isin(sel_yrs)) & (df_all['國家'].isin(sel_countries)) & (df_all['市場區域'].isin(sel_area))]
 
@@ -149,63 +158,63 @@ if uploaded_file:
         k1.metric("總銷售金額", f"NT${df['金額'].sum():,.0f}")
         k2.metric("收費訂單量", f"{df['收費量'].sum():,.0f}")
         k3.metric("FOC 總量", f"{df['FOC總量'].sum():,.0f}")
-        total_denom = df['收費量'].sum() + df['FOC總量'].sum()
-        foc_rate = (df['FOC總量'].sum() / (total_denom + 0.0001) * 100)
-        k4.metric("平均贈針比", f"{foc_rate:.1f}%") # 這裡已經有百分比
+        total_real_qty = df['收費量'].sum() + df['FOC總量'].sum()
+        k4.metric("平均贈針比", f"{(df['FOC總量'].sum() / (total_real_qty + 0.0001) * 100):.1%}")
         k5.metric("活躍國家數", f"{df['國家'].nunique()}")
 
         tabs = st.tabs(["📊 市場佔比與YoY", "🎯 產品排行", "📉 FOC 專項分析", "⚡ 營運效率", "🔍 明細查詢"])
 
-        with tabs[0]: # 成長分析
-            metric_opt = st.selectbox("選擇指標", ["銷售金額", "收費訂單數量", "FOC 總數量"])
-            m_col = {'銷售金額': '金額', '收費訂單數量': '收費量', 'FOC 總數量': 'FOC總量'}[metric_opt]
-            c1, c2 = st.columns(2)
-            c1.plotly_chart(px.pie(df.groupby('國家')[m_col].sum().reset_index(), values=m_col, names='國家', hole=0.4, title=f"各國佔比 ({yr_str})", color_discrete_sequence=px.colors.qualitative.Pastel), use_container_width=True)
-            
-            pivot_df = df.pivot_table(index='國家', columns='年度', values=m_col, aggfunc='sum').fillna(0)
-            display_df = pivot_df.copy()
-            sorted_years = sorted(pivot_df.columns)
-            
-            for i in range(1, len(sorted_years)):
-                curr, prev = sorted_years[i], sorted_years[i-1]
-                display_df[f"{curr}年 成長率%"] = np.where(
-                    pivot_df[prev] == 0, 0.0,
-                    ((pivot_df[curr] - pivot_df[prev]) / pivot_df[prev] * 100)
-                )
-            
-            ordered = []
-            for y in sorted_years:
-                ordered.append(y)
-                if f"{y}年 成長率%" in display_df.columns: ordered.append(f"{y}年 成長率%")
-            
-            # --- 關鍵修正：表格數值格式化加上 % 符號 ---
-            display_pivot = display_df[ordered].copy()
-            display_pivot.columns = [f"{int(c)}年" if isinstance(c, (int, float)) else c for c in display_pivot.columns]
-            
-            # 建立格式字典
-            format_mapping = {}
-            for col in display_pivot.columns:
-                if '成長率%' in str(col):
-                    format_mapping[col] = "{:.1f}%" # 比率加上 %
-                else:
-                    format_mapping[col] = "{:,.0f}" # 金額量保留整數加逗號
-            
-            def style_growth(val, col):
-                if '成長率' in str(col):
-                    return f'color: {"green" if val > 0 else "red" if val < 0 else "black"}; font-weight: bold'
-                return ''
-            
-            st.write("#### 逐年趨勢細節 (YoY%)")
-            st.dataframe(display_pivot.style.format(format_mapping).apply(lambda x: [style_growth(v, x.name) for v in x], axis=0))
-
-        with tabs[2]: # FOC 專項
+        with tabs[2]: # FOC 專項分析
             st.subheader(f"📉 FOC 原因分佈 ({yr_str})")
             f_cols = ['Workshop Training', 'Rebate', '醫師酬勞', '市場贊助與樣品', '客訴補償', '其他待分類FOC']
             f_sum = df[f_cols].sum().reset_index()
             f_sum.columns = ['類別', '數量']
             st.plotly_chart(px.bar(f_sum, x='類別', y='數量', color='類別', text_auto=True), use_container_width=True)
-            st.write("#### FOC 識別明細")
-            st.dataframe(df[df['FOC總量']>0][['銷貨日期', '國家', '客戶', '產品', '數量', '贈品量_單獨欄位', '金額', '備註']], use_container_width=True)
+            
+            st.divider()
+            st.write("#### 🔍 FOC 分類核對工具")
+            # --- 關鍵功能：新增類別過濾器 ---
+            target_foc_cat = st.selectbox("選擇要查看的區塊 (類別)：", options=["全部 FOC"] + f_cols)
+            
+            foc_display_df = df[df['FOC總量'] > 0].copy()
+            if target_foc_cat != "全部 FOC":
+                foc_display_df = foc_display_df[foc_display_df['FOC類別'] == target_foc_cat]
+            
+            st.write(f"顯示類別：**{target_foc_cat}** (共 {len(foc_display_df)} 筆資料)")
+            st.dataframe(foc_display_df[['銷貨日期', '國家', '客戶', '產品', '數量', '贈品量_單獨欄位', '金額', '備註']], use_container_width=True)
+
+        with tabs[0]: # YoY 成長
+            metric_opt = st.selectbox("選擇指標", ["銷售金額", "收費訂單數量", "FOC 總數量"])
+            m_col = {'銷售金額': '金額', '收費訂單數量': '收費量', 'FOC 總數量': 'FOC總量'}[metric_opt]
+            c1, c2 = st.columns(2)
+            c1.plotly_chart(px.pie(df.groupby('國家')[m_col].sum().reset_index(), values=m_col, names='國家', hole=0.4, title=f"各國份額 ({yr_str})", color_discrete_sequence=px.colors.qualitative.Pastel), use_container_width=True)
+            pivot_df = df.pivot_table(index='國家', columns='年度', values=m_col, aggfunc='sum').fillna(0)
+            display_df = pivot_df.copy()
+            sorted_years = sorted(pivot_df.columns)
+            for i in range(1, len(sorted_years)):
+                curr, prev = sorted_years[i], sorted_years[i-1]
+                display_df[f"{curr}年 成長率%"] = np.where(pivot_df[prev] == 0, np.nan, ((pivot_df[curr] - pivot_df[prev]) / pivot_df[prev] * 100))
+            ordered = []
+            for y in sorted_years:
+                ordered.append(y)
+                if f"{y}年 成長率%" in display_df.columns: ordered.append(f"{y}年 成長率%")
+            display_pivot = display_df[ordered].copy()
+            display_pivot.columns = [f"{int(c)}年" if isinstance(c, (int, float)) else c for c in display_pivot.columns]
+            def format_value(val, col_name):
+                if '成長率%' in str(col_name):
+                    if pd.isna(val): return "-"
+                    return f"{val:.1f}%"
+                return f"{val:,.0f}"
+            def style_growth(val, col_name):
+                if '成長率%' in str(col_name):
+                    if pd.isna(val): return 'color: gray'
+                    if val > 0: return 'color: red; font-weight: bold'
+                    if val < 0: return 'color: green; font-weight: bold'
+                return ''
+            formatted_df = display_pivot.copy().astype(object)
+            for col in display_pivot.columns:
+                formatted_df[col] = display_pivot[col].apply(lambda x: format_value(x, col))
+            st.dataframe(formatted_df.style.apply(lambda x: [style_growth(display_pivot.loc[x.name, col], col) for col in display_pivot.columns], axis=1))
 
         with tabs[1]:
             p_df = df.groupby('產品')['金額'].sum().sort_values(ascending=False).reset_index().head(12)
@@ -213,10 +222,7 @@ if uploaded_file:
         with tabs[3]:
             eff_df = df.groupby('國家').agg({'收費量':'sum', 'FOC總量':'sum'}).reset_index()
             eff_df['轉換率'] = (eff_df['收費量'] / (eff_df['FOC總量'] + 0.001)).round(1)
-            st.plotly_chart(px.bar(eff_df.sort_values('轉換率', ascending=False), x='國家', y='轉換率', title="FOC 投資轉換率 (數值為1支贈針換回幾支訂單)", color='轉換率', text_auto=True), use_container_width=True)
-            area_rev = df.groupby('市場區域')['金額'].sum().reset_index()
-            ec2_pie = px.pie(area_rev, values='金額', names='市場區域', title="區域營收分佈", hole=0.5)
-            st.plotly_chart(ec2_pie, use_container_width=True)
+            st.plotly_chart(px.bar(eff_df.sort_values('轉換率', ascending=False), x='國家', y='轉換率', title="FOC 投資轉換率", color='轉換率', text_auto=True), use_container_width=True)
         with tabs[4]:
             search_q = st.text_input("搜尋客戶或產品...").lower()
             q_df = df.copy()
@@ -224,4 +230,4 @@ if uploaded_file:
                 q_df = q_df[q_df['客戶'].str.lower().str.contains(search_q, na=False) | q_df['產品'].str.lower().str.contains(search_q, na=False)]
             st.dataframe(q_df[['銷貨日期', '市場區域', '國家', '客戶', '產品', '數量', '金額', '備註']], use_container_width=True)
 else:
-    st.info("👋 管理員您好，請導入 Excel 檔案。系統已優化百分比顯示格式。")
+    st.info("👋 管理員您好，請導入 Excel。本版本已加入 FOC 類別核對工具與產品名稱修正。")
