@@ -59,7 +59,7 @@ def smart_normalize(df):
     p_df['銷貨日期'] = pd.to_datetime(df[c_date_col], errors='coerce') if c_date_col else pd.Timestamp.now()
     p_df['年度'] = p_df['銷貨日期'].dt.year.fillna(0).astype(int)
     
-    # --- 關鍵修正 1：強制鎖定 2023 年之後 ---
+    # 強制鎖定 2023 年之後
     p_df = p_df[p_df['年度'] >= 2023].copy()
     if p_df.empty: return pd.DataFrame()
 
@@ -86,35 +86,49 @@ def smart_normalize(df):
     else:
         p_df['備註'] = safe_get_series('NOTE').loc[p_df.index].astype(str).replace('nan', '')
 
-    # --- 關鍵修正 2：FOC 精細分類邏輯 (七大主題) ---
+    # --- 關鍵修正：FOC 精細分類邏輯 (依照最新指令) ---
     p_df['實際FOC數量'] = np.where((p_df['單價'] <= 0) | (p_df['金額'] <= 0), p_df['數量'], 0) + p_df['贈品量_單獨欄位']
     
-    # 定義分類順序與關鍵字 (注意：Workshop 必須排在 Training 前面以防誤判)
     def classify_foc(row):
         f_qty = row['實際FOC數量']
         if f_qty <= 0: return '非FOC'
         
         rem = str(row['備註']).lower()
         
-        if any(x in rem for x in ['workshop training']):
+        # 1. Workshop Training (優先判定複合詞)
+        if 'workshop training' in rem:
             return 'Workshop Training'
-        if any(x in rem for x in ['實操針', '示範針', '會員實操針', '培訓針', '培訓施打用針']):
+        
+        # 2. 培訓活動用針 (實操針、示範針、會員實操針、培訓針、培訓施打用針、Demo、培訓活動施打用針)
+        if any(x in rem for x in ['實操針', '示範針', '會員實操針', '培訓針', '培訓施打用針', 'demo', '培訓活動施打用針']):
             return '培訓活動用針'
-        if any(x in rem for x in ['酬勞針', '講師針']):
+        
+        # 3. 醫師酬勞 (酬勞針、講師針、Speech)
+        if any(x in rem for x in ['酬勞針', '講師針', 'speech']):
             return '醫師酬勞'
+        
+        # 4. Training/Rebate for JP (rebate、training)
         if any(x in rem for x in ['rebate', 'training']):
-            return 'Training/Rebate'
+            return 'Training/Rebate for JP'
+        
+        # 5. 市場贊助 (sponsorship、launch event)
         if any(x in rem for x in ['sponsorship', 'launch event']):
             return '市場贊助'
+        
+        # 6. 研究用針 (sample needles、irb)
         if any(x in rem for x in ['sample needles', 'irb']):
             return '研究用針'
         
-        return 'FOC樣品運輸' # 剩下的全部歸入此項
+        # 7. 客訴補償 (新增 Customer complaints)
+        if any(x in rem for x in ['complaints', '客訴', '補償', '瑕疵', '更換', 'quality', 'customer complaints']):
+            return '客訴補償'
+        
+        return 'FOC樣品運輸' # 剩下的歸類於此
 
     p_df['FOC類別'] = p_df.apply(classify_foc, axis=1)
     
-    # 建立對比用的數量欄位
-    foc_cats = ['培訓活動用針', '醫師酬勞', 'Workshop Training', 'Training/Rebate', '市場贊助', '研究用針', 'FOC樣品運輸']
+    # 建立對比欄位
+    foc_cats = ['培訓活動用針', '醫師酬勞', 'Workshop Training', 'Training/Rebate for JP', '市場贊助', '研究用針', '客訴補償', 'FOC樣品運輸']
     for cat in foc_cats:
         p_df[cat] = np.where(p_df['FOC類別'] == cat, p_df['實際FOC數量'], 0)
     
@@ -123,15 +137,15 @@ def smart_normalize(df):
     
     return p_df
 
-# --- 3. 主程式 ---
+# --- 3. 主程式介面 ---
 with st.sidebar:
-    st.title("⚙️ 數據導入")
+    st.title("⚙️ 數據管理")
     admin_mode = st.toggle("管理員模式")
     uploaded_file = None
     if admin_mode:
         pwd = st.text_input("管理密碼", type="password")
         if pwd == "sunmax888":
-            uploaded_file = st.file_uploader("上傳 Excel", type=["xlsx"])
+            uploaded_file = st.file_uploader("上傳 Excel (支援多系統整合)", type=["xlsx"])
 
 st.title("📊 双美全球銷售數據")
 
@@ -140,7 +154,7 @@ if uploaded_file:
     all_data_list = [smart_normalize(df_temp) for name, df_temp in all_sheets.items() if not df_temp.empty]
     df_all = pd.concat(all_data_list, ignore_index=True)
     
-    # 頂部篩選器
+    # 頂部篩選
     sc1, sc2, sc3 = st.columns([1, 1, 2])
     sel_area = sc1.multiselect("🏙️ 區域", options=['台灣市場', '中國市場', '海外市場'], default=['海外市場', '中國市場'])
     filtered_by_area = df_all[df_all['市場區域'].isin(sel_area)]
@@ -166,22 +180,8 @@ if uploaded_file:
 
         tabs = st.tabs(["📊 市場佔比與YoY", "🎯 產品排行", "📉 FOC 專項分析", "⚡ 營運效率", "🔍 明細查詢"])
 
-        with tabs[2]: # FOC 專項分析
-            st.subheader(f"📉 FOC 原因分佈 ({yr_str})")
-            f_cols = ['培訓活動用針', '醫師酬勞', 'Workshop Training', 'Training/Rebate', '市場贊助', '研究用針', 'FOC樣品運輸']
-            f_sum = df[f_cols].sum().reset_index()
-            f_sum.columns = ['類別', '數量']
-            st.plotly_chart(px.bar(f_sum, x='類別', y='數量', color='類別', text_auto=True, title="FOC 七大分類統計"), use_container_width=True)
-            
-            st.divider()
-            target_foc_cat = st.selectbox("🔍 FOC 類別明細核對：", options=["全部 FOC"] + f_cols)
-            foc_display_df = df[df['FOC總量'] > 0].copy()
-            if target_foc_cat != "全部 FOC":
-                foc_display_df = foc_display_df[foc_display_df['FOC類別'] == target_foc_cat]
-            st.dataframe(foc_display_df[['銷貨日期', '國家', '客戶', '產品', '數量', '贈品量_單獨欄位', '金額', '備註']], use_container_width=True)
-
-        with tabs[0]: # 跨年度對比
-            metric_opt = st.selectbox("選擇指標", ["銷售金額", "收費訂單數量", "FOC 總數量"])
+        with tabs[0]: # YoY 成長表格 (紅漲綠跌版)
+            metric_opt = st.selectbox("選擇分析指標", ["銷售金額", "收費訂單數量", "FOC 總數量"])
             m_col = {'銷售金額': '金額', '收費訂單數量': '收費量', 'FOC 總數量': 'FOC總量'}[metric_opt]
             c1, c2 = st.columns(2)
             c1.plotly_chart(px.pie(df.groupby('國家')[m_col].sum().reset_index(), values=m_col, names='國家', hole=0.4, title=f"各國份額佔比", color_discrete_sequence=px.colors.qualitative.Pastel), use_container_width=True)
@@ -207,13 +207,28 @@ if uploaded_file:
             def style_g(val, col_n):
                 if '成長率%' in str(col_n):
                     if pd.isna(val): return 'color: gray'
-                    return f'color: {"red" if val > 0 else "green"}; font-weight: bold'
+                    return f'color: {"red" if val > 0 else "green"}; font-weight: bold' # 紅漲綠跌
                 return ''
             
             formatted_df = display_pivot.copy().astype(object)
             for col in display_pivot.columns:
                 formatted_df[col] = display_pivot[col].apply(lambda x: format_v(x, col))
-            st.dataframe(formatted_df.style.apply(lambda x: [style_g(display_pivot.loc[x.name, col], col) for col in display_pivot.columns], axis=1))
+            st.dataframe(formatted_df.style.apply(lambda x: [style_g(display_pivot.loc[x.name, col], col) for col in display_pivot.columns], axis=1), use_container_width=True)
+
+        with tabs[2]: # FOC 專項分析 (連動篩選版)
+            st.subheader(f"📉 FOC 原因分佈 ({yr_str})")
+            f_cols = ['培訓活動用針', '醫師酬勞', 'Workshop Training', 'Training/Rebate for JP', '市場贊助', '研究用針', '客訴補償', 'FOC樣品運輸']
+            f_sum = df[f_cols].sum().reset_index()
+            f_sum.columns = ['類別', '數量']
+            st.plotly_chart(px.bar(f_sum, x='類別', y='數量', color='類別', text_auto=True, title="FOC 八大分類統計"), use_container_width=True)
+            
+            st.divider()
+            target_foc_cat = st.selectbox("🔍 FOC 類別明細核對：", options=["全部 FOC"] + f_cols)
+            foc_display_df = df[df['FOC總量'] > 0].copy()
+            if target_foc_cat != "全部 FOC":
+                foc_display_df = foc_display_df[foc_display_df['FOC類別'] == target_foc_cat]
+            st.write(f"目前顯示：**{target_foc_cat}** (共 {len(foc_display_df)} 筆資料)")
+            st.dataframe(foc_display_df[['銷貨日期', '國家', '客戶', '產品', '數量', '贈品量_單獨欄位', '金額', '備註']], use_container_width=True)
 
         with tabs[1]: # 產品
             p_df = df.groupby('產品')['金額'].sum().sort_values(ascending=False).reset_index().head(12)
@@ -223,12 +238,12 @@ if uploaded_file:
             eff_df['轉換率'] = (eff_df['收費量'] / (eff_df['FOC總量'] + 0.001)).round(1)
             st.plotly_chart(px.bar(eff_df.sort_values('轉換率', ascending=False), x='國家', y='轉換率', title="FOC 投資轉換率", color='轉換率', text_auto=True), use_container_width=True)
         with tabs[4]: # 明細
-            search_q = st.text_input("搜尋客戶或產品...").lower()
+            search_q = st.text_input("搜尋客戶、產品或備註...").lower()
             q_df = df.copy()
             if search_q:
-                q_df = q_df[q_df['客戶'].str.lower().str.contains(search_q, na=False) | q_df['產品'].str.lower().str.contains(search_q, na=False)]
+                q_df = q_df[q_df['客戶'].str.lower().str.contains(search_q, na=False) | q_df['產品'].str.lower().str.contains(search_q, na=False) | q_df['備註'].str.lower().str.contains(search_q, na=False)]
             st.dataframe(q_df[['銷貨日期', '市場區域', '國家', '客戶', '產品', '數量', '金額', '備註']], use_container_width=True)
     else:
-        st.warning("⚠️ 2023年起無數據，請確認資料來源。")
+        st.warning("⚠️ 此篩選條件下無 2023 年之後的數據。")
 else:
-    st.info("👋 管理員您好，請導入 Excel。本版已鎖定 2023 起之數據並細化 FOC 分類。")
+    st.info("👋 管理員您好，請導入 Excel。本版已更新 FOC 八大歸類邏輯。")
