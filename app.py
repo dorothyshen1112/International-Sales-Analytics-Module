@@ -63,7 +63,6 @@ def smart_normalize(df):
 
     p_df['國家'] = safe_get_series('COUNTRY').loc[p_df.index].fillna('台灣').astype(str)
     
-    # 區域與商務模式
     def classify_region_and_model(c):
         c_str = str(c).strip()
         if c_str in ['台灣', '臺灣', 'TAIWAN']: return '台灣市場', '經銷商模式'
@@ -73,34 +72,32 @@ def smart_normalize(df):
     
     p_df['市場區域'], p_df['商務模式'] = zip(*p_df['國家'].apply(classify_region_and_model))
     
-    # --- 關鍵修正：智慧全名對接引擎 (SG/PH/MY/TH) ---
+    # --- 關鍵修正：精準官方全名強制對接 ---
     raw_cust_series = safe_get_series('CUSTOMER').loc[p_df.index].fillna('未知客戶').astype(str)
     
     def get_official_full_name(name, country):
-        name_up = name.upper()
-        country_up = country.upper()
+        n_up = name.upper()
+        c = str(country)
         
-        # 新加坡全名
-        if 'VANGUARD' in name_up and ('新加坡' in country or 'SINGAPORE' in country_up):
+        # 1. 新加坡
+        if 'VANGUARD' in n_up and ('新加坡' in c or 'SINGAPORE' in c.upper()):
             return 'VANGUARD AESTHETICS PTE. LTD.'
-        # 菲律賓全名
-        if 'VANGUARD' in name_up and ('菲律賓' in country or 'PHILIPPINES' in country_up):
+        # 2. 菲律賓
+        if 'VANGUARD' in n_up and ('菲律賓' in c or 'PHILIPPINES' in c.upper()):
             return 'VANGUARD AESTHETICS OPC'
-        # 馬來西亞全名
-        if 'VANGUARD' in name_up and ('馬來西亞' in country or 'MALAYSIA' in country_up):
+        # 3. 馬來西亞
+        if 'VANGUARD' in n_up and ('馬來西亞' in c or 'MALAYSIA' in c.upper()):
             return 'Vanguard Aesthetics Sdn Bhd'
-        # 泰國全名
-        if 'QUALTECH' in name_up:
+        # 4. 泰國
+        if 'QUALTECH' in n_up:
             return 'Qualtech Consulting (Thailand)'
         
-        # 其他（如日本診所）則進行基本清洗
-        clean_name = re.sub(r'\s*(PTE\.?\s*LTD\.?|SDN\.?\s*BHD\.?|OPC|CORP\.?|INC\.?|CO\.?|LTD\.?)$', '', name_up).strip()
-        return clean_name
+        # 其他（如日本診所）則去除結尾縮寫並保持原樣
+        clean = re.sub(r'\s*(PTE\.?\s*LTD\.?|SDN\.?\s*BHD\.?|OPC|CORP\.?|INC\.?|CO\.?|LTD\.?)$', '', n_up).strip()
+        return clean
 
-    # 同時參考名稱與國家來決定全名
     p_df['客戶'] = [get_official_full_name(n, c) for n, c in zip(raw_cust_series, p_df['國家'])]
     
-    # 產品與數值處理
     p_df['產品'] = safe_get_series('PRODUCT').loc[p_df.index].astype(str).str.replace('Sunmax DeusaDerm', 'Sunmax Deusaderm VITAL', case=False).str.replace('VITAL VITAL', 'VITAL', case=False)
     p_df['數量'] = safe_get_series('QTY', True).loc[p_df.index]
     p_df['贈品量'] = safe_get_series('GIFT_QTY', True).loc[p_df.index]
@@ -127,7 +124,8 @@ def smart_normalize(df):
         return 'FOC樣品運輸'
 
     p_df['FOC類別'] = p_df.apply(classify_foc_row, axis=1)
-    for cat in foc_cats: p_df[cat] = np.where(p_df['FOC類別'] == cat, p_df['實際FOC數量'], 0.0)
+    for cat in foc_cats:
+        p_df[cat] = np.where(p_df['FOC類別'] == cat, p_df['實際FOC數量'], 0.0)
     p_df['FOC總量'] = p_df['實際FOC數量']
     p_df['收費量'] = np.where(p_df['金額'] > 0, p_df['數量'], 0.0)
     return p_df
@@ -148,7 +146,7 @@ with st.sidebar:
     if admin_mode:
         pwd = st.text_input("管理密碼", type="password")
         if pwd == "sunmax888":
-            uploaded_file = st.file_uploader("上傳 Excel", type=["xlsx"])
+            uploaded_file = st.file_uploader("上傳最新 Excel", type=["xlsx"])
 
 final_df = None
 if uploaded_file:
@@ -186,17 +184,17 @@ if final_df is not None:
             st.subheader("⚡ 全球營運效率與模式深度解析")
             c_eff1, c_eff2 = st.columns(2)
             with c_eff1:
-                st.markdown('<div class="report-note"><b>1. 市場滲透度 (活躍客戶數)：</b><br>● <span class="highlight-text">經銷商已自動對接官方全名</span>。<br>● 新加坡、菲律賓、馬來西亞、泰國目前各顯示為 1 個實體。</div>', unsafe_allow_html=True)
+                st.markdown('<div class="report-note"><b>1. 市場滲透度 (活躍客戶數)：</b><br>● 新加坡/菲律賓/馬來西亞/泰國已自動對接官方全名並合併。<br>● <span class="highlight-text">經銷商市場應顯示為 1</span>。</div>', unsafe_allow_html=True)
                 active_cust_list = df.groupby(['國家', '商務模式'])['客戶'].unique().apply(lambda x: ", ".join(x)).reset_index()
                 active_cust_count = df.groupby(['國家', '商務模式'])['客戶'].nunique().reset_index()
                 active_merged = pd.merge(active_cust_count, active_cust_list, on=['國家', '商務模式'], suffixes=('_量', '_名單'))
                 fig_cust = px.bar(active_merged.sort_values('客戶_量', ascending=False), x='國家', y='客戶_量', color='商務模式', hover_data={'客戶_名單': True}, title="活躍客戶/診所總數", text_auto=True)
                 st.plotly_chart(fig_cust, use_container_width=True)
-                with st.expander("📝 點此展開：查看識別出的各國公司全名"):
+                with st.expander("📝 點此展開：查看識別出的各國官方名稱"):
                     st.table(active_merged[['國家', '商務模式', '客戶_名單']].rename(columns={'客戶_名單':'官方全名/診所名單'}))
             
             with c_eff2:
-                st.markdown('<div class="report-note"><b>2. 物流模式分析 (平均單次規模)：</b><br>● 經銷商大宗採購 vs 日本診所小量多次。</div>', unsafe_allow_html=True)
+                st.markdown('<div class="report-note"><b>2. 物流模式分析 (平均單次規模)：</b><br>● 數值越高代表單次採購量大，物流效率越好。</div>', unsafe_allow_html=True)
                 order_size = df[df['收費量']>0].groupby(['國家', '商務模式']).agg({'收費量':'sum', '銷貨日期':'count'}).reset_index()
                 order_size['規模'] = (order_size['收費量'] / (order_size['銷貨日期'] + 0.0001)).round(1)
                 st.plotly_chart(px.bar(order_size.sort_values('規模', ascending=False), x='國家', y='規模', color='商務模式', title="平均訂單規模", text_auto=True), use_container_width=True)
@@ -204,10 +202,9 @@ if final_df is not None:
             st.divider()
             c_eff3, c_eff4 = st.columns([2, 1])
             with c_eff3:
-                st.markdown('<div class="report-note"><b>3. 行銷投資回報 (FOC 轉換效率)：</b><br>● 每投入1支贈針換回幾張訂單。數值越高代表投入產出比越高。</div>', unsafe_allow_html=True)
                 eff_df = df.groupby('國家').agg({'收費量':'sum', 'FOC總量':'sum'}).reset_index()
                 eff_df['效率'] = (eff_df['收費量'] / (eff_df['FOC總量'] + 0.001)).round(1)
-                st.plotly_chart(px.bar(eff_df.sort_values('效率', ascending=False), x='國家', y='效率', title="行銷槓桿比", color='效率', text_auto=True), use_container_width=True)
+                st.plotly_chart(px.bar(eff_df.sort_values('效率', ascending=False), x='國家', y='效率', title="3. 行銷槓桿比 (1支FOC換回幾張訂單)", color='效率', text_auto=True), use_container_width=True)
             with c_eff4:
                 st.plotly_chart(px.pie(df, names='商務模式', hole=0.5, color_discrete_sequence=['#0984E3', '#00B894'], title="全球模式佔比"), use_container_width=True)
 
