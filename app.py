@@ -15,14 +15,8 @@ st.markdown("""
     h1, h2, h3 { color: #0984E3; font-family: 'Helvetica Neue', sans-serif; }
     div.stTabs [data-baseweb="tab-list"] { gap: 15px; border-bottom: 2px solid #F1F3F5; }
     .report-note { 
-        background-color: #E3F2FD; 
-        padding: 15px; 
-        border-left: 6px solid #2196F3; 
-        border-radius: 4px; 
-        margin-bottom: 15px; 
-        font-size: 0.95rem; 
-        color: #1565C0;
-        line-height: 1.6;
+        background-color: #E3F2FD; padding: 15px; border-left: 6px solid #2196F3; 
+        border-radius: 4px; margin-bottom: 15px; font-size: 0.95rem; color: #1565C0; line-height: 1.6;
     }
     .highlight-text { color: #D32F2F; font-weight: bold; }
     </style>
@@ -31,6 +25,7 @@ st.markdown("""
 # --- 2. 智慧數據處理引擎 ---
 def smart_normalize(df):
     if df.empty: return pd.DataFrame()
+    # 抓取 BX 欄位 (第 76 欄)
     bx_note_series = df.iloc[:, 75].astype(str).replace('nan', '') if df.shape[1] >= 76 else None
     df.columns = [str(c).replace(' ', '').replace('\n', '').upper() for c in df.columns]
     
@@ -78,7 +73,7 @@ def smart_normalize(df):
     
     p_df['市場區域'], p_df['商務模式'] = zip(*p_df['國家'].apply(classify_region_and_model))
     
-    # 官方全名對接
+    # 官方全名對接 (SG/PH/MY/TH)
     raw_cust_series = safe_get_series('CUSTOMER').loc[p_df.index].fillna('未知客戶').astype(str)
     def get_official_name(name, country):
         n_up = name.upper()
@@ -98,7 +93,7 @@ def smart_normalize(df):
     p_df['金額'] = safe_get_series('AMOUNT', True).loc[p_df.index]
     p_df['備註'] = bx_note_series.loc[p_df.index].values if bx_note_series is not None else safe_get_series('NOTE').loc[p_df.index].astype(str).replace('nan', '')
 
-    # FOC 分類
+    # FOC 七大分類邏輯
     p_df['實際FOC數量'] = np.where((p_df['單價'] <= 0) | (p_df['金額'] <= 0), p_df['數量'], 0.0) + p_df['贈品量']
     foc_cats = ['培訓活動用針', '醫師酬勞', 'Workshop Training', 'Training/Rebate for JP', '市場贊助', '研究用針', '客訴補償', 'FOC樣品運輸']
     for cat in foc_cats: p_df[cat] = 0.0
@@ -126,7 +121,7 @@ def load_and_merge(file):
     data_list = [smart_normalize(df_temp) for name, df_temp in all_sheets.items() if not df_temp.empty]
     return pd.concat(data_list, ignore_index=True) if data_list else None
 
-# --- 4. 側邊欄 ---
+# --- 4. UI 介面 ---
 with st.sidebar:
     st.title("⚙️ 數據管理")
     admin_mode = st.toggle("管理員模式")
@@ -158,13 +153,16 @@ if final_df is not None:
         k1.metric("總銷售金額", f"NT${df['金額'].sum():,.0f}")
         k2.metric("收費訂單量", f"{df['收費量'].sum():,.0f}")
         k3.metric("FOC 贈送總量", f"{df['FOC總量'].sum():,.0f}")
+        
+        # --- 關鍵修正：修正平均贈針比 944% 的 Bug ---
         total_out = df['收費量'].sum() + df['FOC總量'].sum()
-        k4.metric("平均贈針比", f"{(df['FOC總量'].sum() / (total_out + 0.0001) * 100):.1%}")
+        foc_rate_val = (df['FOC總量'].sum() / (total_out + 0.0001)) * 100
+        k4.metric("平均贈針比", f"{foc_rate_val:.1f}%")
         k5.metric("活躍國家數", f"{df['國家'].nunique()}")
 
         tabs = st.tabs(["📊 市場佔比與YoY", "🎯 產品排行", "📉 FOC 專項分析", "⚡ 營運效率(進階)", "🔍 明細查詢"])
 
-        with tabs[3]: # 營運效率 (藍色說明框全面補回)
+        with tabs[3]: # 營運效率 (藍色說明框全數回歸)
             st.subheader("⚡ 全球營運效率與模式深度解析")
             
             c_e1, c_e2 = st.columns(2)
@@ -247,7 +245,8 @@ if final_df is not None:
         with tabs[1]: st.plotly_chart(px.bar(df.groupby('產品')['金額'].sum().sort_values(ascending=False).reset_index().head(12), x='金額', y='產品', orientation='h', color='金額', title="全球產品銷售排行榜"), use_container_width=True)
         with tabs[2]: # FOC
             f_cols = ['培訓活動用針', '醫師酬勞', 'Workshop Training', 'Training/Rebate for JP', '市場贊助', '研究用針', '客訴補償', 'FOC樣品運輸']
-            st.plotly_chart(px.bar(df[f_cols].sum().reset_index().rename(columns={'index':'類別', 0:'數量'}), x='類別', y='數量', color='類別', text_auto=True), use_container_width=True)
+            f_sum = df[f_cols].sum().reset_index().rename(columns={'index':'類別', 0:'數量'})
+            st.plotly_chart(px.bar(f_sum, x='類別', y='數量', color='類別', text_auto=True), use_container_width=True)
             target = st.selectbox("🔍 FOC 明細過濾：", options=["全部 FOC"] + f_cols)
             foc_view = df[df['FOC總量']>0].copy()
             if target != "全部 FOC": foc_view = foc_view[foc_view['FOC類別'] == target]
