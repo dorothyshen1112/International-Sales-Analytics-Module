@@ -4,7 +4,7 @@ import plotly.express as px
 import numpy as np
 import re
 
-# --- 1. 頁面配置 ---
+# --- 1. 頁面配置 (精密淨白風格) ---
 st.set_page_config(page_title="双美全球銷售數據系統", layout="wide")
 st.markdown("""
     <style>
@@ -13,10 +13,11 @@ st.markdown("""
     [data-testid="stMetricValue"] { font-size: 1.6rem !important; color: #0984E3; font-weight: 700; }
     h1, h2, h3 { color: #0984E3; font-family: 'Helvetica Neue', sans-serif; }
     div.stTabs [data-baseweb="tab-list"] { gap: 15px; border-bottom: 2px solid #F1F3F5; }
+    .report-note { background-color: #E3F2FD; padding: 10px; border-left: 5px solid #2196F3; margin-bottom: 10px; font-size: 0.9rem; }
     </style>
     """, unsafe_allow_html=True)
 
-# --- 2. 智慧數據引擎 ---
+# --- 2. 智慧數據處理引擎 ---
 def smart_normalize(df):
     if df.empty: return pd.DataFrame()
     bx_note_series = df.iloc[:, 75].astype(str).replace('nan', '') if df.shape[1] >= 76 else None
@@ -52,6 +53,7 @@ def smart_normalize(df):
     p_df['銷貨日期'] = pd.to_datetime(df[c_date_col], errors='coerce') if c_date_col else pd.Timestamp.now()
     p_df['年度'] = p_df['銷貨日期'].dt.year.fillna(0).astype(int)
     p_df['月份'] = p_df['銷貨日期'].dt.month.fillna(0).astype(int)
+    
     p_df = p_df[p_df['年度'] >= 2023].copy()
     if p_df.empty: return pd.DataFrame()
 
@@ -115,6 +117,7 @@ if uploaded_file:
     all_data_list = [smart_normalize(df_temp) for name, df_temp in all_sheets.items() if not df_temp.empty]
     df_all = pd.concat(all_data_list, ignore_index=True)
     
+    # 頂部篩選器
     sc1, sc2, sc3 = st.columns([1, 1, 2])
     sel_area = sc1.multiselect("🏙️ 區域", options=['台灣市場', '中國市場', '海外市場'], default=['海外市場', '中國市場'])
     available_countries = sorted(df_all[df_all['市場區域'].isin(sel_area)]['國家'].unique())
@@ -137,48 +140,50 @@ if uploaded_file:
         k4.metric("平均贈針比", f"{(df['FOC總量'].sum() / (total_denom + 0.0001) * 100):.1%}")
         k5.metric("活躍國家數", f"{df['國家'].nunique()}")
 
-        tabs = st.tabs(["📊 市場佔比與YoY", "🎯 產品排行", "📉 FOC 專項分析", "⚡ 營運效率(進階)", "🔍 明細查詢"])
+        tabs = st.tabs(["📊 市場佔比與YoY", "🎯 產品排行", "📉 FOC 專項分析", "⚡ 營運效率(業務導航)", "🔍 明細查詢"])
 
-        with tabs[3]: # 營運效率 (白話文改版)
+        # --- 營運效率：業務白話文強化版 ---
+        with tabs[3]:
             st.subheader("⚡ 營運效率與模式經營解析")
             
-            with st.expander("💡 點此查看：如何解讀這份報表？"):
-                st.write("""
-                * **市場滲透度 (左圖)**：日本採取『直營診所模式』，數值越高代表我們進入了越多家診所；中/東南亞採取『經銷商模式』，數值通常為1。
-                * **物流進貨模式 (右圖)**：數值越高代表是大宗進貨（經銷商特徵），數值越低代表是小量多次快遞（診所直營特徵）。
-                * **行銷槓桿比 (下圖)**：每一支贈針(FOC)投入後，平均換回了多少張收費訂單。這可以看出該國的行銷投資報酬率。
-                """)
-
             c_eff1, c_eff2 = st.columns(2)
+            
             with c_eff1:
+                st.markdown('<div class="report-note"><b>1. 市場滲透度分析：</b><br>這代表我們在當地「開了多少家店」。日本是直營診所模式，數值越高代表進入越多診所；經銷商模式下，數值通常只有1個（即當地唯一代理商）。</div>', unsafe_allow_html=True)
                 active_cust = df.groupby(['國家', '商務模式'])['客戶'].nunique().reset_index()
-                st.plotly_chart(px.bar(active_cust.sort_values('客戶', ascending=False), x='國家', y='客戶', color='商務模式', 
-                                  title="1. 市場滲透度 (活躍客戶/診所數)", labels={'客戶':'活躍客戶數量'}, text_auto=True), use_container_width=True)
+                fig_cust = px.bar(active_cust.sort_values('客戶', ascending=False), x='國家', y='客戶', color='商務模式', 
+                                  title="各國活躍客戶總數 (滲透力指標)", text_auto=True)
+                st.plotly_chart(fig_cust, use_container_width=True)
+
             with c_eff2:
+                st.markdown('<div class="report-note"><b>2. 物流採購規模：</b><br>這代表客戶「買貨的力道」。經銷商通常大批量採購（降低物流成本）；日本直營診所則是小量多次採購。如果數值太低，代表每出一張單的行政成本太高。</div>', unsafe_allow_html=True)
                 order_size = df[df['收費量']>0].groupby(['國家', '商務模式']).agg({'收費量':'sum', '銷貨日期':'count'}).reset_index()
                 order_size['平均單次採購量'] = (order_size['收費量'] / order_size['銷貨日期']).round(1)
-                st.plotly_chart(px.bar(order_size.sort_values('平均單次採購量', ascending=False), x='國家', y='平均單次採購量', color='商務模式', 
-                                  title="2. 物流模式 (平均每單件數)", labels={'平均單次採購量':'平均單筆採購規模'}, text_auto=True), use_container_width=True)
-            
+                fig_size = px.bar(order_size.sort_values('平均單次採購量', ascending=False), x='國家', y='平均單次採購量', 
+                                  color='商務模式', title="平均每筆訂單規模 (物流效率指標)", text_auto=True)
+                st.plotly_chart(fig_size, use_container_width=True)
+
             st.divider()
             
             c_eff3, c_eff4 = st.columns([2, 1])
             with c_eff3:
+                st.markdown('<div class="report-note"><b>3. 行銷投資回報率 (槓桿比)：</b><br>這是最重要的效率指標。代表「每送出1支贈針，能換回多少支訂單」。數值越高，代表該國的培訓、樣品投入轉換效果越好。</div>', unsafe_allow_html=True)
                 eff_df = df.groupby('國家').agg({'收費量':'sum', 'FOC總量':'sum'}).reset_index()
                 eff_df['行銷效率'] = (eff_df['收費量'] / (eff_df['FOC總量'] + 0.001)).round(1)
-                st.plotly_chart(px.bar(eff_df.sort_values('行銷效率', ascending=False), x='國家', y='行銷效率', 
-                                  title="3. 行銷投資回報 (1支贈針換回幾支訂單)", labels={'行銷效率':'槓桿比 (倍數)'}, color='行銷效率', text_auto=True), use_container_width=True)
+                fig_eff = px.bar(eff_df.sort_values('行銷效率', ascending=False), x='國家', y='行銷效率', 
+                                  title="行銷槓桿比 (1支贈針帶動的收費量)", color='行銷效率', text_auto=True)
+                st.plotly_chart(fig_eff, use_container_width=True)
+            
             with c_eff4:
-                # 簡單的模式佔比
-                st.write("#### 4. 全球商務模式分佈")
+                st.markdown('<div class="report-note"><b>4. 商務模式分佈：</b><br>顯示公司整體的全球佈局結構。</div>', unsafe_allow_html=True)
                 st.plotly_chart(px.pie(df, names='商務模式', hole=0.5, color_discrete_sequence=['#0984E3', '#00B894']), use_container_width=True)
 
-            st.write("#### 5. 各國進貨節奏熱力圖 (顏色越深代表該月進貨越多)")
+            st.markdown('<div class="report-note"><b>5. 全球採購節奏分析：</b><br>顏色越深代表該月份進貨最猛。這能幫您一眼看出各國的銷售淡旺季，提前安排庫存與出差。</div>', unsafe_allow_html=True)
             heat_df = df.groupby(['國家', '月份'])['金額'].sum().reset_index()
-            st.plotly_chart(px.density_heatmap(heat_df, x='月份', y='國家', z='金額', color_continuous_scale='YlGnBu'), use_container_width=True)
+            st.plotly_chart(px.density_heatmap(heat_df, x='月份', y='國家', z='金額', color_continuous_scale='Blues', title="各國進貨熱點月份"), use_container_width=True)
 
-        # 其餘分頁 (維持原本優秀功能)
-        with tabs[0]: # YoY 成長
+        # 市場成長 (YoY)
+        with tabs[0]:
             metric_opt = st.selectbox("選擇指標", ["銷售金額", "收費訂單數量", "FOC 總數量"])
             m_col = {'銷售金額': '金額', '收費訂單數量': '收費量', 'FOC 總數量': 'FOC總量'}[metric_opt]
             c1, c2 = st.columns(2)
@@ -226,4 +231,4 @@ if uploaded_file:
             if search_q: q_df = q_df[q_df['客戶'].str.lower().str.contains(search_q, na=False) | q_df['產品'].str.lower().str.contains(search_q, na=False)]
             st.dataframe(q_df[['銷貨日期', '市場區域', '商務模式', '國家', '客戶', '產品', '數量', '金額', '備註']], use_container_width=True)
 else:
-    st.info("👋 管理員您好，請導入 Excel。本版已強化『營運效率』的業務導讀功能。")
+    st.info("👋 管理員您好，請導入 Excel。本版已針對營運效率增加『業務指導語』備註。")
