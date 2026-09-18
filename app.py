@@ -5,7 +5,7 @@ import numpy as np
 import os
 import re
 
-# --- 1. 頁面配置 ---
+# --- 1. 頁面配置 (精密淨白風格) ---
 st.set_page_config(page_title="双美全球銷售數據系統", layout="wide")
 st.markdown("""
     <style>
@@ -22,27 +22,27 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- 2. 智慧數據處理引擎 (解鎖歷史與最強容錯) ---
+# --- 2. 智慧數據處理引擎 ---
 def smart_normalize(df):
     if df is None or df.empty or len(df.columns) < 2: return pd.DataFrame()
     
-    # 預抓 BX 備註 (第76欄)
+    # 預抓新系統 BX 備註 (索引 75)
     bx_note = df.iloc[:, 75].astype(str).replace('nan', '') if df.shape[1] >= 76 else None
     
-    # 清理標題：去空格、換行、轉大寫
-    df.columns = [str(c).strip().replace('\n', '').replace('\r', '').upper() for c in df.columns]
+    # 清理標題
+    df.columns = [str(c).strip().replace('\n', '').upper() for c in df.columns]
     
     # [地毯式匹配字典]
     m = {
-        'DATE': ['銷貨日期', '單據日期', '日期', 'DATE', '銷貨日期A', '單據日', '成交日期', '開單日期', '日期_1'],
-        'YEAR': ['年度', '年', 'YEAR', '年度_1', '年份', '西元年', 'YYYY', 'FISCALYEAR', '會計年度', '西元'],
-        'COUNTRY': ['國家', '地區', 'COUNTRY', '區域', '廠別名稱', '地  區', '省份', '市場', '國別'],
-        'CUSTOMER': ['客戶簡稱', '客戶', '客戶名稱', 'CUSTOMER', '送貨客戶全名', '經銷商', '代理商'],
-        'PRODUCT': ['品名', '業務品名', '產品名稱', 'PRODUCT', '品號', '業務規格', '品  名', '項目名稱'],
-        'QTY': ['銷貨數量', '數量', '計價數量', '總數量', 'QTY', '件數', '出貨數量', '數量_1'],
+        'DATE': ['銷貨日期', '單據日期', '日期', 'DATE', '銷貨日期A', '成交日期', '開單日期'],
+        'YEAR': ['年度', '年', 'YEAR', '年份', '西元年', 'YYYY'],
+        'COUNTRY': ['國家', '地區', 'COUNTRY', '區域', '廠別名稱', '地  區', '省份', '市場', '收貨地址', '送貨地址一'],
+        'CUSTOMER': ['客戶簡稱', '客戶', '客戶名稱', 'CUSTOMER', '送貨客戶全名', '經銷商'],
+        'PRODUCT': ['品名', '業務品名', '產品名稱', 'PRODUCT', '品號', '項目名稱'],
+        'QTY': ['銷貨數量', '數量', '計價數量', '總數量', 'QTY', '件數', '出貨數量'],
         'GIFT_QTY': ['贈/備品量', '贈品量', '贈品數量', 'GIFTQTY'],
-        'PRICE': ['單價', '單價NT', 'PRICE', '單   價', '單  價', '單位成本'],
-        'AMOUNT': ['本幣未稅金額', '本幣合計', '金額', '未稅金額', 'AMOUNT', '總計', '本幣金額', '銷貨金額', '幣別金額', '合計', '銷貨淨額']
+        'PRICE': ['單價', '單價NT', 'PRICE', '單   價'],
+        'AMOUNT': ['本幣未稅金額', '本幣合計', '金額', '未稅金額', 'AMOUNT', '總計', '本幣金額', '銷貨金額', '合計']
     }
 
     def find_col(key):
@@ -53,70 +53,76 @@ def smart_normalize(df):
 
     p_df = pd.DataFrame()
     
-    # 智慧時間識別：解鎖 2007-2022
+    # 1. 時間識別
     c_year = find_col('YEAR')
     c_date = find_col('DATE')
-    
     if c_year:
-        # 強制提取數字年度
         p_df['年度'] = pd.to_numeric(df[c_year].astype(str).str.extract('(\d{4})')[0], errors='coerce').fillna(0).astype(int)
-        p_df['銷貨日期'] = pd.to_datetime(p_df['年度'].astype(str) + '-01-01', errors='coerce')
+        p_df['銷貨日期'] = pd.to_datetime(p_df['年度'].astype(str) + '-01-01')
     elif c_date:
         dates = pd.to_datetime(df[c_date], errors='coerce')
-        if dates.isna().all(): # 如果日期欄存的是 2012 這種純數字
-            p_df['年度'] = pd.to_numeric(df[c_date].astype(str).str.extract('(\d{4})')[0], errors='coerce').fillna(0).astype(int)
-            p_df['銷貨日期'] = pd.to_datetime(p_df['年度'].astype(str) + '-01-01', errors='coerce')
-        else:
-            p_df['銷貨日期'] = dates
-            p_df['年度'] = p_df['銷貨日期'].dt.year.fillna(0).astype(int)
-    else:
-        return pd.DataFrame()
+        p_df['銷貨日期'] = dates
+        p_df['年度'] = dates.dt.year.fillna(0).astype(int)
+    else: return pd.DataFrame()
 
-    # 保留 2000 年之後的所有數據
     p_df = p_df[(p_df['年度'] >= 2000) & (p_df['年度'] < 2040)].copy()
     if p_df.empty: return pd.DataFrame()
     p_df['月份'] = p_df['銷貨日期'].dt.month.fillna(1).astype(int)
-    
-    # 國家分類
-    c_country = find_col('COUNTRY')
-    p_df['國家'] = df[c_country].loc[p_df.index].fillna('台灣').astype(str) if c_country else '台灣'
-    def classify_region(c):
-        c_str = str(c).strip()
-        if any(x in c_str for x in ['台灣', '臺灣']): return '台灣市場', '經銷商模式'
-        if any(x in c_str for x in ['大陸', '中國', 'CHINA']): return '中國市場', '經銷商模式'
-        if '日本' in c_str or 'JAPAN' in c_str.upper(): return '海外市場', '直營診所模式'
-        return '海外市場', '經銷商模式'
-    p_df['市場區域'], p_df['商務模式'] = zip(*p_df['國家'].apply(classify_region))
 
-    # 官方全名對接
-    def get_official(name, country):
-        n, c = str(name).upper(), str(country).upper()
-        if 'VANGUARD' in n:
-            if '新加坡' in country or 'SINGAPORE' in c: return 'VANGUARD AESTHETICS PTE. LTD.'
-            if '菲律賓' in country or 'PHILIPPINES' in c: return 'VANGUARD AESTHETICS OPC'
-            if '馬來西亞' in country or 'MALAYSIA' in c: return 'Vanguard Aesthetics Sdn Bhd'
-        if 'QUALTECH' in n: return 'Qualtech Consulting (Thailand)'
-        return re.sub(r'\s*(PTE\.?\s*LTD\.?|SDN\.?\s*BHD\.?|OPC|CORP\.?|INC\.?|CO\.?|LTD\.?)$', '', n).strip()
-    
-    c_cust = find_col('CUSTOMER')
-    cust_data = df[c_cust].loc[p_df.index].astype(str) if c_cust else pd.Series(['未知客戶']*len(p_df))
-    p_df['客戶'] = [get_official(n, c) for n, c in zip(cust_data, p_df['國家'])]
-
-    # 數值轉換 (強化清理，確保不閃退)
+    # 2. 數值提取 (強力清理)
     def to_num(key):
         col = find_col(key)
-        if not col: return pd.Series([0.0]*len(p_df)).loc[p_df.index]
+        if not col: return pd.Series([0.0]*len(df)).loc[p_df.index]
         return pd.to_numeric(df[col].loc[p_df.index].astype(str).str.replace(r'[^-0-9.]', '', regex=True), errors='coerce').fillna(0.0)
 
-    p_df['產品'] = df[find_col('PRODUCT')].loc[p_df.index].astype(str).str.replace('Sunmax DeusaDerm', 'Sunmax Deusaderm VITAL', case=False).str.replace('VITAL VITAL', 'VITAL', case=False) if find_col('PRODUCT') else "未知產品"
     p_df['數量'] = to_num('QTY')
     p_df['贈品量'] = to_num('GIFT_QTY')
     p_df['單價'] = to_num('PRICE')
     p_df['金額'] = to_num('AMOUNT')
+
+    # 3. 智慧區域分類 (根據國家、客戶、或地址自動判定)
+    c_country_col = find_col('COUNTRY')
+    c_cust_col = find_col('CUSTOMER')
+    
+    raw_country = df[c_country_col].astype(str).loc[p_df.index] if c_country_col else pd.Series(['']*len(p_df))
+    raw_cust = df[c_cust_col].astype(str).loc[p_df.index] if c_cust_col else pd.Series(['']*len(p_df))
+
+    def auto_classify(row_idx):
+        country_txt = raw_country.loc[row_idx].upper()
+        cust_txt = raw_cust.loc[row_idx].upper()
+        full_txt = country_txt + cust_txt
+        
+        if any(x in full_txt for x in ['台灣', '臺灣', 'TAIWAN']): return '台灣', '台灣市場', '經銷商模式'
+        if any(x in full_txt for x in ['大陸', '中國', 'CHINA', 'MAINLAND']): return '大陸', '中國市場', '經銷商模式'
+        if 'SINGAPORE' in full_txt or '新加坡' in full_txt: return '新加坡', '海外市場', '經銷商模式'
+        if 'MALAYSIA' in full_txt or '馬來西亞' in full_txt: return '馬來西亞', '海外市場', '經銷商模式'
+        if 'PHILIPPINES' in full_txt or '菲律賓' in full_txt: return '菲律賓', '海外市場', '經銷商模式'
+        if 'THAILAND' in full_txt or '泰國' in full_txt: return '泰國', '海外市場', '經銷商模式'
+        if 'JAPAN' in full_txt or '日本' in full_txt: return '日本', '海外市場', '直營診所模式'
+        if 'GERMANY' in full_txt or '德國' in full_txt: return '德國', '海外市場', '經銷商模式'
+        return '其他', '海外市場', '經銷商模式'
+
+    p_df['國家'], p_df['市場區域'], p_df['商務模式'] = zip(*[auto_classify(i) for i in p_df.index])
+
+    # 4. 客戶全名對接
+    def get_official(name, country):
+        n, c = str(name).upper(), str(country).upper()
+        if 'VANGUARD' in n:
+            if 'SINGAPORE' in c or '新加坡' in c: return 'VANGUARD AESTHETICS PTE. LTD.'
+            if 'PHILIPPINES' in c or '菲律賓' in c: return 'VANGUARD AESTHETICS OPC'
+            if 'MALAYSIA' in c or '馬來西亞' in c: return 'Vanguard Aesthetics Sdn Bhd'
+        if 'QUALTECH' in n: return 'Qualtech Consulting (Thailand)'
+        return re.sub(r'\s*(PTE\.?\s*LTD\.?|SDN\.?\s*BHD\.?|OPC|CORP\.?|INC\.?|CO\.?|LTD\.?)$', '', n).strip()
+    
+    p_df['客戶'] = [get_official(n, c) for n, c in zip(raw_cust, p_df['國家'])]
+    p_df['產品'] = df[find_col('PRODUCT')].loc[p_df.index].astype(str).str.replace('Sunmax DeusaDerm', 'Sunmax Deusaderm VITAL', case=False).str.replace('VITAL VITAL', 'VITAL', case=False) if find_col('PRODUCT') else "未知產品"
     p_df['備註'] = bx_note.loc[p_df.index].values if bx_note is not None else (df[find_col('NOTE')].loc[p_df.index].astype(str).replace('nan', '') if find_col('NOTE') else "")
 
-    # FOC
-    p_df['實際FOC數量'] = np.where((p_df['單價'] <= 0) | (p_df['金額'] <= 0), p_df['數量'], 0.0) + p_df['贈品量']
+    # 5. FOC 邏輯修正 (金額大於0 絕對不是 FOC)
+    p_df['實際FOC數量'] = np.where((p_df['金額'] <= 0) & ((p_df['單價'] <= 0) | (p_df['數量'] > 0)), p_df['數量'], 0.0) + p_df['贈品量']
+    # 如果舊系統沒抓到單價但金額很高，強制將 FOC 設為 0
+    p_df.loc[p_df['金額'] > 0, '實際FOC數量'] = 0.0
+    
     foc_cats = ['培訓活動用針', '醫師酬勞', 'Workshop Training', 'Training/Rebate for JP', '市場贊助', '研究用針', '客訴補償', 'FOC樣品運輸']
     for cat in foc_cats: p_df[cat] = 0.0
     def classify_foc_row(row):
@@ -133,6 +139,7 @@ def smart_normalize(df):
         return 'FOC樣品運輸'
     p_df['FOC類別'] = p_df.apply(classify_foc_row, axis=1)
     for cat in foc_cats: p_df[cat] = np.where(p_df['FOC類別'] == cat, p_df['實際FOC數量'], 0.0)
+    
     p_df['FOC總量'] = p_df['實際FOC數量']
     p_df['收費量'] = np.where(p_df['金額'] > 0, p_df['數量'], 0.0)
     return p_df
@@ -142,56 +149,51 @@ def load_all_data():
     if not os.path.exists("data.xlsx"): return None
     try:
         sheets = pd.read_excel("data.xlsx", sheet_name=None)
-        all_dfs = []
-        for name, df_sheet in sheets.items():
-            norm = smart_normalize(df_sheet)
-            if not norm.empty: all_dfs.append(norm)
+        all_dfs = [smart_normalize(df_sheet) for name, df_sheet in sheets.items() if not df_sheet.empty]
         return pd.concat(all_dfs, ignore_index=True) if all_dfs else None
     except Exception as e:
-        st.error(f"⚠️ 數據讀取中斷：{e}")
+        st.error(f"❌ 數據加載失敗：{e}")
         return None
 
-# --- 4. 主程式 ---
+# --- 4. 主介面 ---
 with st.sidebar:
     st.title("⚙️ 數據管理")
-    if st.toggle("管理員模式") and st.text_input("管理密碼", type="password") == "sunmax888":
+    if st.toggle("管理員模式") and st.text_input("密碼", type="password") == "sunmax888":
         st.file_uploader("上傳 Excel", type=["xlsx"])
-        if st.button("更新數據"): st.cache_data.clear()
+        if st.button("更新數據快取"): st.cache_data.clear()
 
 st.title("📊 双美全球銷售數據")
 df_all = load_all_data()
 
 if df_all is not None:
-    # 篩選器
     sc1, sc2, sc3 = st.columns([1, 1, 2])
-    sel_area = sc1.multiselect("區域", ['台灣市場', '中國市場', '海外市場'], default=['海外市場', '中國市場'])
+    sel_area = sc1.multiselect("區域", ['台灣市場', '中國市場', '海外市場'], default=['海外市場', '中國市場', '台灣市場'])
     available_countries = sorted(df_all[df_all['市場區域'].isin(sel_area)]['國家'].unique())
     sel_countries = sc3.multiselect("國家", available_countries, default=available_countries)
-    all_available_yrs = sorted([int(y) for y in df_all['年度'].unique() if y > 0])
-    # --- 關鍵修正：App 打開時預設選取全部找得到的年份 ---
-    sel_yrs = sc2.multiselect("年度", options=all_available_yrs, default=all_available_yrs)
+    all_yrs = sorted([int(y) for y in df_all['年度'].unique() if y > 0])
+    sel_yrs = sc2.multiselect("年度", options=all_yrs, default=all_yrs)
 
     df = df_all[(df_all['年度'].isin(sel_yrs)) & (df_all['國家'].isin(sel_countries)) & (df_all['市場區域'].isin(sel_area))]
 
     if not df.empty:
         yr_label = f"{min(sel_yrs)}年-{max(sel_yrs)}年" if len(sel_yrs)>1 else f"{sel_yrs[0]}年"
-        st.write(f"🔍 **數據統計區間：{yr_label}**")
         k1, k2, k3, k4, k5 = st.columns(5)
         k1.metric("總銷售金額", f"NT${df['金額'].sum():,.0f}")
         k2.metric("收費訂單量", f"{df['收費量'].sum():,.0f}")
         k3.metric("FOC 贈送總量", f"{df['FOC總量'].sum():,.0f}")
-        tot_q = df['收費量'].sum() + df['FOC總量'].sum()
-        k4.metric("平均贈針比", f"{(df['FOC總量'].sum() / (tot_q + 0.0001) * 100):.1%}")
+        # --- 關鍵修正：修正贈針比計算邏輯 ---
+        tot_qty = df['收費量'].sum() + df['FOC總量'].sum()
+        f_rate = (df['FOC總量'].sum() / (tot_qty + 0.0001)) * 100
+        k4.metric("平均贈針比", f"{f_rate:.1f}%")
         k5.metric("活躍國家數", f"{df['國家'].nunique()}")
 
         tabs = st.tabs(["📊 市場佔比與YoY", "🎯 產品排行", "📉 FOC 專項分析", "⚡ 營運效率(進階)", "🔍 明細查詢"])
         
-        with tabs[0]: 
+        with tabs[0]: # 市場佔比 & 大表格
             metric_opt = st.selectbox("分析指標", ["金額", "收費量", "FOC總量"])
             m_col = {'金額': '金額', '收費量': '收費量', 'FOC總量': 'FOC總量'}[metric_opt]
             st.plotly_chart(px.pie(df.groupby('國家')[m_col].sum().reset_index(), values=m_col, names='國家', hole=0.4, title="各國份額佔比", color_discrete_sequence=px.colors.qualitative.Pastel), use_container_width=True)
             st.divider()
-            st.write("#### 📈 逐年成長趨勢表 (YoY%) - 可左右滑動")
             pivot = df.pivot_table(index='國家', columns='年度', values=m_col, aggfunc='sum').fillna(0)
             sorted_y = sorted(pivot.columns); disp = pivot.copy()
             for i in range(1, len(sorted_y)):
@@ -210,24 +212,30 @@ if df_all is not None:
                 return ''
             st.dataframe(disp[f_cols].style.format(f_dict, na_rep="-").apply(lambda x: [color_logic(v, x.name) for v in x], axis=0), height=450, use_container_width=True)
 
-        with tabs[3]: # 營運效率 (藍色引航說明永久固定)
+        with tabs[3]: # 營運效率 (藍色說明永久鎖定)
             st.subheader("⚡ 全球營運效率與模式深度解析")
-            st.markdown('<div class="report-note"><b>1. 市場滲透度分析：</b><br>● 日本(直營)顯示已進入診所總數；經銷商國家應為 1。</div>', unsafe_allow_html=True)
+            st.markdown('<div class="report-note"><b>1. 市場滲透度分析：</b><br>● 日本(直營)顯示診所總量。經銷商國家應為 1。</div>', unsafe_allow_html=True)
             st.plotly_chart(px.bar(df.groupby(['國家', '商務模式'])['客戶'].nunique().reset_index().sort_values('客戶', ascending=False), x='國家', y='客戶', color='商務模式', title="活躍客戶/診所總數", text_auto=True), use_container_width=True)
-            with st.expander("📋 查看各國公司名單"):
+            with st.expander("📋 查看名單"):
                 cust_dt = df.groupby(['國家', '商務模式'])['客戶'].unique().reset_index()
                 cust_dt['清單'] = cust_dt['客戶'].apply(lambda x: "\n".join([f"• {name}" for name in x]))
                 st.write(cust_dt[['國家', '商務模式', '清單']].to_html(escape=False).replace('\\n', '<br>'), unsafe_allow_html=True)
             st.divider()
-            st.markdown('<div class="report-note"><b>2. 物流模式分析：</b><br>● 經銷商大宗進貨數值高；日本診所小量多次數值低。數值低於 100 代表報關行政成本負擔重。</div>', unsafe_allow_html=True)
+            st.markdown('<div class="report-note"><b>2. 物流模式分析：</b><br>● 經銷商大宗進貨數值高；日本診所小量多次數值低。</div>', unsafe_allow_html=True)
             order_sz = df[df['收費量']>0].groupby(['國家', '商務模式']).agg({'收費量':'sum', '銷貨日期':'count'}).reset_index()
             order_sz['規模'] = (order_sz['收費量'] / (order_sz['銷貨日期'] + 0.0001)).round(1)
             st.plotly_chart(px.bar(order_sz.sort_values('規模', ascending=False), x='國家', y='規模', color='商務模式', title="平均單次訂單規模", text_auto=True), use_container_width=True)
             st.divider()
-            st.markdown('<div class="report-note"><b>3. 行銷投資回報：</b><br>● 每投入1支贈針換回幾張訂單。數值越高代表 Workshop 或 Demo 的「轉單力」越強。</div>', unsafe_allow_html=True)
+            st.markdown('<div class="report-note"><b>3. 行銷投資回報：</b><br>● 每投入1支贈針換回幾張訂單。數值越高代表投資報酬率越高。</div>', unsafe_allow_html=True)
             eff_df = df.groupby('國家').agg({'收費量':'sum', 'FOC總量':'sum'}).reset_index()
             eff_df['效率'] = (eff_df['收費量'] / (eff_df['FOC總量'] + 0.001)).round(1)
             st.plotly_chart(px.bar(eff_df.sort_values('效率', ascending=False), x='國家', y='效率', title="行銷槓桿比", color='效率', text_auto=True), use_container_width=True)
+            st.divider()
+            st.markdown('<div class="report-note"><b>4. 銷售季節性分析：</b><br>顏色越深代表進貨越多。</div>', unsafe_allow_html=True)
+            heat_df = df.groupby(['國家', '月份'])['金額'].sum().reset_index()
+            fig_h = px.density_heatmap(heat_df, x='月份', y='國家', z='金額', color_continuous_scale='Blues', nbinsx=12, range_x=[0.5, 12.5], text_auto='.2s')
+            fig_h.update_xaxes(tickmode='linear', tick0=1, dtick=1, ticktext=[f"{i}月" for i in range(1,13)], tickvals=list(range(1,13)))
+            st.plotly_chart(fig_h, use_container_width=True)
 
         with tabs[2]: # FOC
             f_cols = ['培訓活動用針', '醫師酬勞', 'Workshop Training', 'Training/Rebate for JP', '市場贊助', '研究用針', '客訴補償', 'FOC樣品運輸']
@@ -242,4 +250,4 @@ if df_all is not None:
             if q: q_df = q_df[q_df['客戶'].str.lower().str.contains(q, na=False) | q_df['產品'].str.lower().str.contains(q, na=False)]
             st.dataframe(q_df[['銷貨日期', '市場區域', '商務模式', '國家', '客戶', '產品', '數量', '金額', '備註']], use_container_width=True)
 else:
-    st.info("👋 管理員您好，請上傳 data.xlsx。系統已解鎖 2007-2026 全歷史數據。")
+    st.warning("👋 尚未發現數據檔案。請上傳 data.xlsx。")
