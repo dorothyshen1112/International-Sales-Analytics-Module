@@ -22,22 +22,22 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- 2. 智慧數據處理引擎 (跨系統相容) ---
+# --- 2. 智慧數據處理引擎 (解鎖歷史與雙系統) ---
 def smart_normalize(df):
     if df is None or df.empty or len(df.columns) < 3: return pd.DataFrame()
     
-    # 預抓 BX 備註
+    # 預抓 BX 備註 (第76欄)
     bx_note = df.iloc[:, 75].astype(str).replace('nan', '') if df.shape[1] >= 76 else None
     
-    # 清理標題
+    # 清理標題：去空格、轉大寫
     df.columns = [str(c).replace(' ', '').replace('\n', '').upper() for c in df.columns]
     
     m = {
         'DATE': ['銷貨日期', '單據日期', '日期', 'DATE', '銷貨日期A', '單據日'],
-        'YEAR_ONLY': ['年度', '年', 'YEAR'],
+        'YEAR_ONLY': ['年度', '年', 'YEAR', '年度_1'],
         'COUNTRY': ['國家', '地區', 'COUNTRY', '區域', '廠別名稱'],
         'CUSTOMER': ['客戶簡稱', '客戶', '客戶名稱', 'CUSTOMER', '送貨客戶全名'],
-        'PRODUCT': ['品名', '業務品名', '產品名稱', 'PRODUCT', '品號', '業務規格'],
+        'PRODUCT': ['品名', '業務品名', '產品名稱', 'PRODUCT', '品號'],
         'QTY': ['銷貨數量', '數量', '計價數量', '總數量', 'QTY', '件數'],
         'GIFT_QTY': ['贈/備品量', '贈品量', '贈品數量', 'GIFTQTY'],
         'PRICE': ['單價', '單價NT', 'PRICE', '單   價'],
@@ -51,7 +51,7 @@ def smart_normalize(df):
 
     p_df = pd.DataFrame()
     
-    # 智慧日期處理 (針對舊系統可能只有"年度"的情況)
+    # 智慧時間識別：優先找日期，找不到找年度
     c_date = find_col('DATE')
     c_year = find_col('YEAR_ONLY')
     
@@ -60,25 +60,26 @@ def smart_normalize(df):
         p_df['年度'] = p_df['銷貨日期'].dt.year.fillna(0).astype(int)
     elif c_year:
         p_df['年度'] = pd.to_numeric(df[c_year], errors='coerce').fillna(0).astype(int)
-        p_df['銷貨日期'] = pd.to_datetime(p_df['年度'].astype(str) + '-01-01')
+        p_df['銷貨日期'] = pd.to_datetime(p_df['年度'].astype(str) + '-01-01', errors='coerce')
     else:
-        return pd.DataFrame() # 真的找不到時間就不抓了
+        return pd.DataFrame() # 沒時間資料則略過
 
-    p_df['月份'] = p_df['銷貨日期'].dt.month.fillna(0).astype(int)
-    # 解鎖歷史數據範圍 (2000-2040)
+    # 過濾不合理年份
     p_df = p_df[(p_df['年度'] >= 2000) & (p_df['年度'] < 2040)].copy()
     if p_df.empty: return pd.DataFrame()
 
+    p_df['月份'] = p_df['銷貨日期'].dt.month.fillna(1).astype(int)
+    
     # 國家與區域分類
     c_country = find_col('COUNTRY')
     p_df['國家'] = df[c_country].loc[p_df.index].fillna('台灣').astype(str) if c_country else '台灣'
-    def classify_reg(c):
-        c_s = str(c).strip()
-        if any(x in c_s for x in ['台灣', '臺灣']): return '台灣市場', '經銷商模式'
-        if any(x in c_s for x in ['大陸', '中國', 'CHINA']): return '中國市場', '經銷商模式'
-        if '日本' in c_s or 'JAPAN' in c_s.upper(): return '海外市場', '直營診所模式'
+    def classify_region(c):
+        c_str = str(c).strip()
+        if any(x in c_str for x in ['台灣', '臺灣']): return '台灣市場', '經銷商模式'
+        if any(x in c_str for x in ['大陸', '中國', 'CHINA']): return '中國市場', '經銷商模式'
+        if '日本' in c_str or 'JAPAN' in c_str.upper(): return '海外市場', '直營診所模式'
         return '海外市場', '經銷商模式'
-    p_df['市場區域'], p_df['商務模式'] = zip(*p_df['國家'].apply(classify_reg))
+    p_df['市場區域'], p_df['商務模式'] = zip(*p_df['國家'].apply(classify_region))
 
     # 官方全名對接 (SG/PH/MY/TH)
     def get_official_name(name, country):
@@ -91,14 +92,13 @@ def smart_normalize(df):
         return re.sub(r'\s*(PTE\.?\s*LTD\.?|SDN\.?\s*BHD\.?|OPC|CORP\.?|INC\.?|CO\.?|LTD\.?)$', '', n).strip()
     
     c_cust = find_col('CUSTOMER')
-    raw_cust = df[c_cust].loc[p_df.index].astype(str) if c_cust else pd.Series(['未知客戶']*len(p_df))
-    p_df['客戶'] = [get_official_name(n, c) for n, c in zip(raw_cust, p_df['國家'])]
+    cust_data = df[c_cust].loc[p_df.index].astype(str) if c_cust else pd.Series(['未知客戶']*len(p_df))
+    p_df['客戶'] = [get_official_name(n, c) for n, c in zip(cust_data, p_df['國家'])]
 
-    # 數值轉換 (金額/數量)
+    # 數值轉換
     def to_num(key):
         col = find_col(key)
-        if not col: return pd.Series([0.0]*len(df)).loc[p_df.index]
-        return pd.to_numeric(df[col].loc[p_df.index].astype(str).str.replace(',', ''), errors='coerce').fillna(0.0)
+        return pd.to_numeric(df[col].loc[p_df.index].astype(str).str.replace(',', ''), errors='coerce').fillna(0.0) if col else pd.Series([0.0]*len(p_df)).loc[p_df.index]
 
     p_df['產品'] = df[find_col('PRODUCT')].loc[p_df.index].astype(str).str.replace('Sunmax DeusaDerm', 'Sunmax Deusaderm VITAL', case=False).str.replace('VITAL VITAL', 'VITAL', case=False) if find_col('PRODUCT') else "未知產品"
     p_df['數量'] = to_num('QTY')
@@ -107,7 +107,7 @@ def smart_normalize(df):
     p_df['金額'] = to_num('AMOUNT')
     p_df['備註'] = bx_note.loc[p_df.index].values if bx_note is not None else (df[find_col('NOTE')].loc[p_df.index].astype(str).replace('nan', '') if find_col('NOTE') else "")
 
-    # FOC 七大分類
+    # FOC 分類
     p_df['實際FOC數量'] = np.where((p_df['單價'] <= 0) | (p_df['金額'] <= 0), p_df['數量'], 0.0) + p_df['贈品量']
     foc_cats = ['培訓活動用針', '醫師酬勞', 'Workshop Training', 'Training/Rebate for JP', '市場贊助', '研究用針', '客訴補償', 'FOC樣品運輸']
     for cat in foc_cats: p_df[cat] = 0.0
@@ -127,10 +127,9 @@ def smart_normalize(df):
     for cat in foc_cats: p_df[cat] = np.where(p_df['FOC類別'] == cat, p_df['實際FOC數量'], 0.0)
     p_df['FOC總量'] = p_df['實際FOC數量']
     p_df['收費量'] = np.where(p_df['金額'] > 0, p_df['數量'], 0.0)
-    
     return p_df
 
-# --- 3. 數據加載邏輯 (智慧合併所有 Sheet) ---
+# --- 3. 數據加載邏輯 ---
 def load_all_data():
     if not os.path.exists("data.xlsx"): return None
     try:
@@ -142,7 +141,7 @@ def load_all_data():
                 if not norm.empty: all_dfs.append(norm)
         return pd.concat(all_dfs, ignore_index=True) if all_dfs else None
     except Exception as e:
-        st.error(f"⚠️ 數據讀取發生錯誤：{e}")
+        st.error(f"⚠️ 讀取失敗：{e}")
         return None
 
 # --- 4. 主介面 ---
@@ -152,26 +151,26 @@ with st.sidebar:
     if admin_mode:
         pwd = st.text_input("管理密碼", type="password")
         if pwd == "sunmax888":
-            st.file_uploader("上傳最新 Excel (臨時)", type=["xlsx"])
-            if st.button("更新數據"): st.cache_data.clear()
+            st.file_uploader("上傳 Excel (臨時)", type=["xlsx"])
+            if st.button("清空快取"): st.cache_data.clear()
 
 st.title("📊 双美全球銷售數據")
 df_all = load_all_data()
 
 if df_all is not None:
-    # 頂部連動篩選器
+    # 篩選器
     sc1, sc2, sc3 = st.columns([1, 1, 2])
     sel_area = sc1.multiselect("區域", ['台灣市場', '中國市場', '海外市場'], default=['海外市場', '中國市場'])
     available_countries = sorted(df_all[df_all['市場區域'].isin(sel_area)]['國家'].unique())
     sel_countries = sc3.multiselect("國家", available_countries, default=available_countries)
     all_yrs = sorted([int(y) for y in df_all['年度'].unique() if y > 0])
-    # 預設全選所有找得到的年份
     sel_yrs = sc2.multiselect("年度", options=all_yrs, default=all_yrs)
 
     df = df_all[(df_all['年度'].isin(sel_yrs)) & (df_all['國家'].isin(sel_countries)) & (df_all['市場區域'].isin(sel_area))]
 
     if not df.empty:
         yr_str = ", ".join([f"{y}年" for y in sorted(sel_yrs)])
+        st.write(f"🔍 **數據統計區間：{yr_str}**")
         k1, k2, k3, k4, k5 = st.columns(5)
         k1.metric("總銷售金額", f"NT${df['金額'].sum():,.0f}")
         k2.metric("收費訂單量", f"{df['收費量'].sum():,.0f}")
@@ -182,60 +181,61 @@ if df_all is not None:
 
         tabs = st.tabs(["📊 市場佔比與YoY", "🎯 產品排行", "📉 FOC 專項分析", "⚡ 營運效率(進階)", "🔍 明細查詢"])
         
-        with tabs[0]: # 市場佔比 & 大表格
+        with tabs[0]: 
             metric_opt = st.selectbox("分析指標", ["金額", "收費量", "FOC總量"])
             m_col = {'金額': '金額', '收費量': '收費量', 'FOC總量': 'FOC總量'}[metric_opt]
-            c1, space = st.columns([1, 1])
-            with c1:
-                pie_df = df.groupby('國家')[m_col].sum().reset_index()
-                st.plotly_chart(px.pie(pie_df, values=m_col, names='國家', hole=0.4, title=f"各國份額佔比 ({yr_str})", color_discrete_sequence=px.colors.qualitative.Pastel), use_container_width=True)
+            st.plotly_chart(px.pie(df.groupby('國家')[m_col].sum().reset_index(), values=m_col, names='國家', hole=0.4, title="各國份額佔比", color_discrete_sequence=px.colors.qualitative.Pastel), use_container_width=True)
+            
             st.divider()
             st.write("#### 📈 逐年成長趨勢表 (YoY%)")
+            # --- 核心邏輯：建立支援大年度跨度的表格 ---
             pivot = df.pivot_table(index='國家', columns='年度', values=m_col, aggfunc='sum').fillna(0)
             sorted_y = sorted(pivot.columns); disp = pivot.copy()
             for i in range(1, len(sorted_y)):
                 curr, prev = sorted_y[i], sorted_y[i-1]
                 disp[f"{curr}年 成長%"] = np.where(pivot[prev]==0, np.nan, (pivot[curr]-pivot[prev])/pivot[prev]*100)
-            f_cols = []
-            f_dict = {}
+            
+            final_cols = []
+            format_dict = {}
             for y in sorted_y:
                 y_c = f"{int(y)}年"; disp = disp.rename(columns={y: y_c})
-                f_cols.append(y_c); f_dict[y_c] = "{:,.0f}"
+                final_cols.append(y_c); format_dict[y_c] = "{:,.0f}"
                 g_c = f"{int(y)}年 成長%"
-                if g_c in disp.columns: f_cols.append(g_c); f_dict[g_c] = "{:.1f}%"
+                if g_c in disp.columns: final_cols.append(g_c); format_dict[g_c] = "{:.1f}%"
+            
             def color_logic(v, n):
                 if '成長%' in str(n) and pd.notna(v):
                     return 'color: #D32F2F; font-weight: bold' if v > 0.001 else 'color: #388E3C; font-weight: bold'
                 return ''
-            st.dataframe(disp[f_cols].style.format(f_dict, na_rep="-").apply(lambda x: [color_logic(v, x.name) for v in x], axis=0), use_container_width=True)
+            # 啟用橫向滾動與自動寬度
+            st.dataframe(disp[final_cols].style.format(format_dict, na_rep="-").apply(lambda x: [color_logic(v, x.name) for v in x], axis=0), use_container_width=True)
 
-        with tabs[3]: # 營運效率 (藍色引航說明永久固定)
+        with tabs[3]: # 營運效率 (藍色說明永久鎖定)
             st.subheader("⚡ 全球營運效率與模式深度解析")
             ce1, ce2 = st.columns(2)
             with ce1:
-                st.markdown('<div class="report-note"><b>1. 市場滲透度分析 (活躍客戶數)：</b><br>● 顯示已進入的經銷商或直營診所總數。日本(直營)數值越高代表開發力越強。</div>', unsafe_allow_html=True)
-                active = df.groupby(['國家', '商務模式'])['客戶'].nunique().reset_index()
-                st.plotly_chart(px.bar(active.sort_values('客戶', ascending=False), x='國家', y='客戶', color='商務模式', title="活躍客戶/診所總數", text_auto=True), use_container_width=True)
-                with st.expander("📋 點此展開：查看各國具體客戶/診所名單"):
+                st.markdown('<div class="report-note"><b>1. 市場滲透度分析：</b><br>● 日本(直營)顯示診所總量。經銷商國家應為 1。</div>', unsafe_allow_html=True)
+                st.plotly_chart(px.bar(df.groupby(['國家', '商務模式'])['客戶'].nunique().reset_index().sort_values('客戶', ascending=False), x='國家', y='客戶', color='商務模式', title="活躍客戶/診所總數", text_auto=True), use_container_width=True)
+                with st.expander("📋 查看名單"):
                     cust_dt = df.groupby(['國家', '商務模式'])['客戶'].unique().reset_index()
                     cust_dt['清單'] = cust_dt['客戶'].apply(lambda x: "\n".join([f"• {name}" for name in x]))
                     st.write(cust_dt[['國家', '商務模式', '清單']].to_html(escape=False).replace('\\n', '<br>'), unsafe_allow_html=True)
             with ce2:
-                st.markdown('<div class="report-note"><b>2. 物流模式分析 (平均單次規模)：</b><br>● 經銷商大宗採購 vs 日本診所小量多次。數值過低代表行政運費成本較重。</div>', unsafe_allow_html=True)
+                st.markdown('<div class="report-note"><b>2. 物流模式分析：</b><br>● 經銷商大宗進貨數值高；日本診所小量多次數值低。</div>', unsafe_allow_html=True)
                 order_sz = df[df['收費量']>0].groupby(['國家', '商務模式']).agg({'收費量':'sum', '銷貨日期':'count'}).reset_index()
                 order_sz['規模'] = (order_sz['收費量'] / (order_sz['銷貨日期'] + 0.0001)).round(1)
                 st.plotly_chart(px.bar(order_sz.sort_values('規模', ascending=False), x='國家', y='規模', color='商務模式', title="平均單次訂單規模", text_auto=True), use_container_width=True)
             st.divider()
             ce3, ce4 = st.columns([2, 1])
             with ce3:
-                st.markdown('<div class="report-note"><b>3. 行銷投資回報 (FOC 轉換效率)：</b><br>● 每投入1支贈針換回幾張訂單。評估該國 Workshop、Demo 的「變現轉單力」。</div>', unsafe_allow_html=True)
+                st.markdown('<div class="report-note"><b>3. 行銷投資回報：</b><br>● 每投入1支贈針換回幾張訂單。評估投入的變現轉單力。</div>', unsafe_allow_html=True)
                 eff_df = df.groupby('國家').agg({'收費量':'sum', 'FOC總量':'sum'}).reset_index()
                 eff_df['效率'] = (eff_df['收費量'] / (eff_df['FOC總量'] + 0.001)).round(1)
                 st.plotly_chart(px.bar(eff_df.sort_values('效率', ascending=False), x='國家', y='效率', title="行銷槓桿比", color='效率', text_auto=True), use_container_width=True)
             with ce4:
-                st.markdown('<div class="report-note"><b>4. 營收模式佔比：</b><br>顯示全球直營診所與代理經銷的營收權重。</div>', unsafe_allow_html=True)
+                st.markdown('<div class="report-note"><b>4. 營收模式佔比：</b><br>顯示全球直營與經銷的營收結構。</div>', unsafe_allow_html=True)
                 st.plotly_chart(px.pie(df, names='商務模式', hole=0.5, color_discrete_sequence=['#0984E3', '#00B894'], title="全球模式佔比"), use_container_width=True)
-            st.markdown('<div class="report-note"><b>5. 全球採購季節性分析：</b><br>顏色越深代表該月進貨越多。用於追蹤展會後的補貨波段。</div>', unsafe_allow_html=True)
+            st.markdown('<div class="report-note"><b>5. 全球採購季節性分析：</b><br>顏色越深代表進貨越多。用於追蹤展會或促銷後的補貨節奏。</div>', unsafe_allow_html=True)
             heat_df = df.groupby(['國家', '月份'])['金額'].sum().reset_index()
             fig_h = px.density_heatmap(heat_df, x='月份', y='國家', z='金額', color_continuous_scale='Blues', nbinsx=12, range_x=[0.5, 12.5], text_auto='.2s')
             fig_h.update_xaxes(tickmode='linear', tick0=1, dtick=1, ticktext=[f"{i}月" for i in range(1,13)], tickvals=list(range(1,13)))
@@ -247,7 +247,7 @@ if df_all is not None:
             st.plotly_chart(px.bar(df[f_cols].sum().reset_index().rename(columns={'index':'類別', 0:'數量'}), x='類別', y='數量', color='類別', text_auto=True), use_container_width=True)
             target = st.selectbox("🔍 FOC 明細過濾：", options=["全部 FOC"] + f_cols)
             foc_v = df[df['FOC總量']>0].copy()
-            if target != "全部 FOC": foc_v = foc_v[foc_view['FOC類別'] == target]
+            if target != "全部 FOC": foc_v = foc_v[foc_v['FOC類別'] == target]
             st.dataframe(foc_v[['銷貨日期', '國家', '客戶', '產品', '數量', '贈品量', '金額', '備註']], use_container_width=True)
         with tabs[4]: # 明細
             q = st.text_input("搜尋關鍵字...").lower()
@@ -255,4 +255,4 @@ if df_all is not None:
             if q: q_df = q_df[q_df['客戶'].str.lower().str.contains(q, na=False) | q_df['產品'].str.lower().str.contains(q, na=False)]
             st.dataframe(q_df[['銷貨日期', '市場區域', '商務模式', '國家', '客戶', '產品', '數量', '金額', '備註']], use_container_width=True)
 else:
-    st.warning("👋 尚未發現數據檔案。請確保 `data.xlsx` 已正確上傳。")
+    st.warning("👋 尚未發現數據檔案。管理員請上傳 data.xlsx 到 GitHub 根目錄。")
