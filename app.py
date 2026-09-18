@@ -26,22 +26,23 @@ st.markdown("""
 def smart_normalize(df):
     if df is None or df.empty or len(df.columns) < 3: return pd.DataFrame()
     
-    # 預抓 BX 備註 (第76欄)
+    # 預抓 BX 備註 (索引 75)
     bx_note = df.iloc[:, 75].astype(str).replace('nan', '') if df.shape[1] >= 76 else None
     
     # 清理標題：去空格、轉大寫
     df.columns = [str(c).replace(' ', '').replace('\n', '').upper() for c in df.columns]
     
+    # 加強版欄位字典
     m = {
         'DATE': ['銷貨日期', '單據日期', '日期', 'DATE', '銷貨日期A', '單據日'],
-        'YEAR_ONLY': ['年度', '年', 'YEAR', '年度_1'],
+        'YEAR_ONLY': ['年度', '年', 'YEAR', '年度_1', '年份', '西元年'],
         'COUNTRY': ['國家', '地區', 'COUNTRY', '區域', '廠別名稱'],
         'CUSTOMER': ['客戶簡稱', '客戶', '客戶名稱', 'CUSTOMER', '送貨客戶全名'],
-        'PRODUCT': ['品名', '業務品名', '產品名稱', 'PRODUCT', '品號'],
+        'PRODUCT': ['品名', '業務品名', '產品名稱', 'PRODUCT', '品號', '業務規格'],
         'QTY': ['銷貨數量', '數量', '計價數量', '總數量', 'QTY', '件數'],
         'GIFT_QTY': ['贈/備品量', '贈品量', '贈品數量', 'GIFTQTY'],
         'PRICE': ['單價', '單價NT', 'PRICE', '單   價'],
-        'AMOUNT': ['本幣未稅金額', '本幣合計', '金額', '未稅金額', 'AMOUNT', '總計']
+        'AMOUNT': ['本幣未稅金額', '本幣合計', '金額', '未稅金額', 'AMOUNT', '總計', '銷貨金額', '本幣金額']
     }
 
     def find_col(key):
@@ -51,7 +52,7 @@ def smart_normalize(df):
 
     p_df = pd.DataFrame()
     
-    # 智慧時間識別：優先找日期，找不到找年度
+    # 智慧時間識別
     c_date = find_col('DATE')
     c_year = find_col('YEAR_ONLY')
     
@@ -62,9 +63,9 @@ def smart_normalize(df):
         p_df['年度'] = pd.to_numeric(df[c_year], errors='coerce').fillna(0).astype(int)
         p_df['銷貨日期'] = pd.to_datetime(p_df['年度'].astype(str) + '-01-01', errors='coerce')
     else:
-        return pd.DataFrame() # 沒時間資料則略過
+        return pd.DataFrame()
 
-    # 過濾不合理年份
+    # 過濾年份雜訊 (解除 2023 限制，鎖定 2000-2040)
     p_df = p_df[(p_df['年度'] >= 2000) & (p_df['年度'] < 2040)].copy()
     if p_df.empty: return pd.DataFrame()
 
@@ -151,25 +152,27 @@ with st.sidebar:
     if admin_mode:
         pwd = st.text_input("管理密碼", type="password")
         if pwd == "sunmax888":
-            st.file_uploader("上傳 Excel (臨時)", type=["xlsx"])
-            if st.button("清空快取"): st.cache_data.clear()
+            st.file_uploader("上傳 Excel", type=["xlsx"])
+            if st.button("更新數據"): st.cache_data.clear()
 
 st.title("📊 双美全球銷售數據")
 df_all = load_all_data()
 
 if df_all is not None:
-    # 篩選器
+    # 頂部篩選器
     sc1, sc2, sc3 = st.columns([1, 1, 2])
     sel_area = sc1.multiselect("區域", ['台灣市場', '中國市場', '海外市場'], default=['海外市場', '中國市場'])
     available_countries = sorted(df_all[df_all['市場區域'].isin(sel_area)]['國家'].unique())
     sel_countries = sc3.multiselect("國家", available_countries, default=available_countries)
+    
+    # --- 關鍵修正：自動獲取所有年份並預設「全部選取」 ---
     all_yrs = sorted([int(y) for y in df_all['年度'].unique() if y > 0])
-    sel_yrs = sc2.multiselect("年度", options=all_yrs, default=all_yrs)
+    sel_yrs = sc2.multiselect("年度", options=all_yrs, default=all_yrs) # 此處改為 default=all_yrs
 
     df = df_all[(df_all['年度'].isin(sel_yrs)) & (df_all['國家'].isin(sel_countries)) & (df_all['市場區域'].isin(sel_area))]
 
     if not df.empty:
-        yr_str = ", ".join([f"{y}年" for y in sorted(sel_yrs)])
+        yr_str = f"{min(sel_yrs)}年-{max(sel_yrs)}年" if len(sel_yrs)>1 else f"{sel_yrs[0]}年"
         st.write(f"🔍 **數據統計區間：{yr_str}**")
         k1, k2, k3, k4, k5 = st.columns(5)
         k1.metric("總銷售金額", f"NT${df['金額'].sum():,.0f}")
@@ -188,29 +191,29 @@ if df_all is not None:
             
             st.divider()
             st.write("#### 📈 逐年成長趨勢表 (YoY%)")
-            # --- 核心邏輯：建立支援大年度跨度的表格 ---
+            # 建立大寬表支援橫向拉動
             pivot = df.pivot_table(index='國家', columns='年度', values=m_col, aggfunc='sum').fillna(0)
             sorted_y = sorted(pivot.columns); disp = pivot.copy()
             for i in range(1, len(sorted_y)):
                 curr, prev = sorted_y[i], sorted_y[i-1]
                 disp[f"{curr}年 成長%"] = np.where(pivot[prev]==0, np.nan, (pivot[curr]-pivot[prev])/pivot[prev]*100)
             
-            final_cols = []
-            format_dict = {}
+            final_f_cols = []
+            f_dict = {}
             for y in sorted_y:
                 y_c = f"{int(y)}年"; disp = disp.rename(columns={y: y_c})
-                final_cols.append(y_c); format_dict[y_c] = "{:,.0f}"
+                final_f_cols.append(y_c); f_dict[y_c] = "{:,.0f}"
                 g_c = f"{int(y)}年 成長%"
-                if g_c in disp.columns: final_cols.append(g_c); format_dict[g_c] = "{:.1f}%"
+                if g_c in disp.columns: final_f_cols.append(g_c); f_dict[g_c] = "{:.1f}%"
             
             def color_logic(v, n):
                 if '成長%' in str(n) and pd.notna(v):
                     return 'color: #D32F2F; font-weight: bold' if v > 0.001 else 'color: #388E3C; font-weight: bold'
                 return ''
-            # 啟用橫向滾動與自動寬度
-            st.dataframe(disp[final_cols].style.format(format_dict, na_rep="-").apply(lambda x: [color_logic(v, x.name) for v in x], axis=0), use_container_width=True)
+            # 橫向拉桿已啟用
+            st.dataframe(disp[final_f_cols].style.format(f_dict, na_rep="-").apply(lambda x: [color_logic(v, x.name) for v in x], axis=0), use_container_width=True)
 
-        with tabs[3]: # 營運效率 (藍色說明永久鎖定)
+        with tabs[3]: # 營運效率 (藍色說明永久固定)
             st.subheader("⚡ 全球營運效率與模式深度解析")
             ce1, ce2 = st.columns(2)
             with ce1:
@@ -228,7 +231,7 @@ if df_all is not None:
             st.divider()
             ce3, ce4 = st.columns([2, 1])
             with ce3:
-                st.markdown('<div class="report-note"><b>3. 行銷投資回報：</b><br>● 每投入1支贈針換回幾張訂單。評估投入的變現轉單力。</div>', unsafe_allow_html=True)
+                st.markdown('<div class="report-note"><b>3. 行銷投資回報：</b><br>● 每投入1支贈針換回幾張訂單。數值越高代表投資報酬率越高。</div>', unsafe_allow_html=True)
                 eff_df = df.groupby('國家').agg({'收費量':'sum', 'FOC總量':'sum'}).reset_index()
                 eff_df['效率'] = (eff_df['收費量'] / (eff_df['FOC總量'] + 0.001)).round(1)
                 st.plotly_chart(px.bar(eff_df.sort_values('效率', ascending=False), x='國家', y='效率', title="行銷槓桿比", color='效率', text_auto=True), use_container_width=True)
