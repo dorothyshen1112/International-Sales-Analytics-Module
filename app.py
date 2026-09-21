@@ -73,7 +73,7 @@ def smart_normalize(df):
     if p_df.empty: return pd.DataFrame()
     p_df['月份'] = p_df['銷貨日期'].dt.month.fillna(1).astype(int)
 
-    # 嚴格地點識別 (只看地點欄位，絕不讓「歐美皮膚科診所」等名稱影響國家判定)
+    # 嚴格地點識別 (絕不讓診所名稱干擾國家判定)
     loc_cols = [c for c in df.columns if any(k in c for k in ['國家', '銷售地', '地區', '路線', '銷售地區', 'COUNTRY', '區域', '省份', '市場', '國別', '銷貨地', '出貨地'])]
     c_cust_col = find_col('CUSTOMER')
     raw_cust = df[c_cust_col].astype(str).loc[p_df.index] if c_cust_col else pd.Series(['']*len(p_df))
@@ -88,7 +88,7 @@ def smart_normalize(df):
 
         country = '其他'
 
-        # 地點欄位優先判定
+        # 地點優先判定
         if any(x in loc_clean for x in ['台灣', '臺灣', 'TAIWAN', 'TW']):
             country = '台灣'
         elif any(x in loc_clean for x in ['大陸', '中國', 'CHINA', 'MAINLAND', '北京', '上海', '廣州', '華東', '華南']):
@@ -108,7 +108,7 @@ def smart_normalize(df):
         elif any(x in loc_clean for x in ['泰國', 'THAILAND', 'TH']):
             country = '泰國'
         else:
-            # 僅當地點欄位「完全為空」時，才容許從客戶名稱推測海外經銷商
+            # 地點欄位完全為空時，才由客戶名稱推測
             if 'VANGUARD' in cust_up:
                 if 'OPC' in cust_up: country = '菲律賓'
                 elif 'SDN' in cust_up: country = '馬來西亞'
@@ -120,7 +120,7 @@ def smart_normalize(df):
             else:
                 country = '台灣' if loc_clean == '' else '其他'
 
-        # 模式與客戶全名歸類
+        # 模式與全名指派
         if country == '台灣':
             return '台灣', '台灣市場', '直營診所模式', cust_str if cust_str else '台灣診所'
         elif country == '日本':
@@ -205,12 +205,18 @@ if df_all is not None:
     sel_area = sc1.multiselect("區域", ['台灣市場', '中國市場', '海外市場'], default=['海外市場', '中國市場', '台灣市場'])
     available_countries = sorted(df_all[df_all['市場區域'].isin(sel_area)]['國家'].unique())
     sel_countries = sc3.multiselect("國家", available_countries, default=available_countries)
+    
+    # --- 關鍵修正：年度預設只勾選「最近兩年」，歷史年份保留在選單供勾選 ---
     all_yrs = sorted([int(y) for y in df_all['年度'].unique() if y > 0])
-    sel_yrs = sc2.multiselect("年度", options=all_yrs, default=all_yrs)
+    default_yrs = all_yrs[-2:] if len(all_yrs) >= 2 else all_yrs
+    sel_yrs = sc2.multiselect("年度", options=all_yrs, default=default_yrs)
 
     df = df_all[(df_all['年度'].isin(sel_yrs)) & (df_all['國家'].isin(sel_countries)) & (df_all['市場區域'].isin(sel_area))]
 
     if not df.empty:
+        yr_label = f"{min(sel_yrs)}年-{max(sel_yrs)}年" if len(sel_yrs) > 1 else f"{sel_yrs[0]}年"
+        st.write(f"🔍 **數據統計區間：{yr_label}**")
+
         # KPI 卡片
         k1, k2, k3, k4, k5 = st.columns(5)
         k1.metric("總銷售金額", f"NT${df['金額'].sum():,.0f}")
@@ -285,7 +291,7 @@ if df_all is not None:
             <b>📉 FOC 贈針資源配置與成本模組：</b><br>
             ● <b>分析重點：</b><br>
             - <b>培訓活動用針</b>：市場教育投資，需比對受訓學員與診所後續的轉單訂購率。<br>
-            - <b>醫師酬勞</b>：海外講師/KOL 技術交流成本，評估帶動的區域知名度與出貨拉動效應。<br>
+            - <b>醫師酬勞</b>：海外 KOL 技術交流成本，評估帶動的區域知名度與出貨拉動效應。<br>
             - <b>市場贊助與樣品</b>：新市場（如泰國、日本初期）拓展的獲客成本 (CAC)。<br>
             - <b>客訴補償</b>：產品與運送品質成本，若特定區域異常升高需檢驗冷鏈物流或防偽包裝。
             </div>""", unsafe_allow_html=True)
@@ -296,7 +302,7 @@ if df_all is not None:
             if target != "全部 FOC": f_data_view = f_data_view[f_data_view['FOC類別'] == target]
             st.dataframe(f_data_view[['銷貨日期', '國家', '客戶', '產品', '數量', '贈品量', '金額', '備註']], use_container_width=True)
 
-        # --- TAB 3: 營運效率 (5 大模組 + 藍色引航「分析重點」全數回歸！) ---
+        # --- TAB 3: 營運效率 (5 大模組 + 藍色引航「分析重點」全數到位) ---
         with tabs[3]:
             st.subheader("⚡ 全球營運效率與模式深度解析")
             
