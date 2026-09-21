@@ -73,7 +73,7 @@ def smart_normalize(df):
     if p_df.empty: return pd.DataFrame()
     p_df['月份'] = p_df['銷貨日期'].dt.month.fillna(1).astype(int)
 
-    # 嚴格地點識別 (只看地點欄位，絕不讓診所名稱影響國家判定)
+    # 嚴格地點識別 (只看地點欄位，絕不讓「歐美皮膚科診所」等名稱影響國家判定)
     loc_cols = [c for c in df.columns if any(k in c for k in ['國家', '銷售地', '地區', '路線', '銷售地區', 'COUNTRY', '區域', '省份', '市場', '國別', '銷貨地', '出貨地'])]
     c_cust_col = find_col('CUSTOMER')
     raw_cust = df[c_cust_col].astype(str).loc[p_df.index] if c_cust_col else pd.Series(['']*len(p_df))
@@ -88,6 +88,7 @@ def smart_normalize(df):
 
         country = '其他'
 
+        # 地點欄位優先判定
         if any(x in loc_clean for x in ['台灣', '臺灣', 'TAIWAN', 'TW']):
             country = '台灣'
         elif any(x in loc_clean for x in ['大陸', '中國', 'CHINA', 'MAINLAND', '北京', '上海', '廣州', '華東', '華南']):
@@ -107,6 +108,7 @@ def smart_normalize(df):
         elif any(x in loc_clean for x in ['泰國', 'THAILAND', 'TH']):
             country = '泰國'
         else:
+            # 僅當地點欄位「完全為空」時，才容許從客戶名稱推測海外經銷商
             if 'VANGUARD' in cust_up:
                 if 'OPC' in cust_up: country = '菲律賓'
                 elif 'SDN' in cust_up: country = '馬來西亞'
@@ -223,6 +225,11 @@ if df_all is not None:
         
         # --- TAB 0: YoY 表格 ---
         with tabs[0]: 
+            st.markdown("""<div class="report-note">
+            <b>📊 市場佔比與 YoY 成長趨勢模組：</b><br>
+            ● <b>分析重點：</b> 監控全球各市場營收佔比與年度擴張速度。YoY% 採用財務慣用之「紅漲綠跌」標註，新市場（去年數據為0）顯示為「-」。若特定市場連續兩年衰退，需啟動區域渠道檢討。
+            </div>""", unsafe_allow_html=True)
+            
             metric_opt = st.selectbox("分析指標", ["金額", "收費量", "FOC總量"])
             m_col = {'金額': '金額', '收費量': '收費量', 'FOC總量': 'FOC總量'}[metric_opt]
             st.plotly_chart(px.pie(df.groupby('國家')[m_col].sum().reset_index(), values=m_col, names='國家', hole=0.4, title="各國份額佔比", color_discrete_sequence=px.colors.qualitative.Pastel), use_container_width=True)
@@ -266,10 +273,22 @@ if df_all is not None:
 
         # --- TAB 1: 產品 ---
         with tabs[1]: 
+            st.markdown("""<div class="report-note">
+            <b>🎯 產品競爭力排行模組：</b><br>
+            ● <b>分析重點：</b> 追蹤明星 SKU 與長青款走勢。監控高階利度卡因（LIDO 系列）在各市場的替換速度，並評估 VITAL 系列在成熟市場的銷量穩定度。
+            </div>""", unsafe_allow_html=True)
             st.plotly_chart(px.bar(df.groupby('產品')['金額'].sum().sort_values(ascending=False).reset_index().head(12), x='金額', y='產品', orientation='h', color='金額', title="全球產品銷售排行榜"), use_container_width=True)
 
         # --- TAB 2: FOC ---
         with tabs[2]: 
+            st.markdown("""<div class="report-note">
+            <b>📉 FOC 贈針資源配置與成本模組：</b><br>
+            ● <b>分析重點：</b><br>
+            - <b>培訓活動用針</b>：市場教育投資，需比對受訓學員與診所後續的轉單訂購率。<br>
+            - <b>醫師酬勞</b>：海外講師/KOL 技術交流成本，評估帶動的區域知名度與出貨拉動效應。<br>
+            - <b>市場贊助與樣品</b>：新市場（如泰國、日本初期）拓展的獲客成本 (CAC)。<br>
+            - <b>客訴補償</b>：產品與運送品質成本，若特定區域異常升高需檢驗冷鏈物流或防偽包裝。
+            </div>""", unsafe_allow_html=True)
             f_cols_list = ['培訓活動用針', '醫師酬勞', 'Workshop Training', 'Training/Rebate for JP', '市場贊助', '研究用針', '客訴補償', 'FOC樣品運輸']
             st.plotly_chart(px.bar(df[f_cols_list].sum().reset_index().rename(columns={'index':'類別', 0:'數量'}), x='類別', y='數量', color='類別', text_auto=True), use_container_width=True)
             target = st.selectbox("🔍 FOC 明細過濾：", options=["全部 FOC"] + f_cols_list)
@@ -277,16 +296,16 @@ if df_all is not None:
             if target != "全部 FOC": f_data_view = f_data_view[f_data_view['FOC類別'] == target]
             st.dataframe(f_data_view[['銷貨日期', '國家', '客戶', '產品', '數量', '贈品量', '金額', '備註']], use_container_width=True)
 
-        # --- TAB 3: 營運效率 (徹底修復 21 億異常數值) ---
+        # --- TAB 3: 營運效率 (5 大模組 + 藍色引航「分析重點」全數回歸！) ---
         with tabs[3]:
             st.subheader("⚡ 全球營運效率與模式深度解析")
             
             ce1, ce2 = st.columns(2)
             with ce1:
                 st.markdown("""<div class="report-note">
-                <b>1. 市場滲透度分析 (活躍客戶數)：</b><br>
-                ● <b>直營診所模式：</b> 日本與台灣顯示實際開拓的診所總數量。<br>
-                ● <b>經銷商模式：</b> 大陸包含「北京享贊」與「東莞双美」共 2 間；東南亞各國、德國與歐美經銷商各為 1 間。
+                <b>1. 市場滲透度分析 (活躍客戶/診所數)：</b><br>
+                ● <b>指標意義：</b> 日本與台灣為「直營診所模式」，數值代表實際開拓並下單的診所數量；其他經銷商國家（大陸 2 間、東南亞各 1 間、德國、歐美）代表合作經銷商數。<br>
+                ● <b>分析重點：</b> 直營市場評估「診所拓點速度與黏著度」；經銷商市場監控「合作通路穩定度，若數值歸零代表代理合約存在中斷風險」。
                 </div>""", unsafe_allow_html=True)
                 active_c = df.groupby(['國家', '商務模式'])['客戶'].nunique().reset_index().sort_values('客戶', ascending=False)
                 st.plotly_chart(px.bar(active_c, x='國家', y='客戶', color='商務模式', title="活躍客戶/診所總數", text_auto=True), use_container_width=True)
@@ -298,8 +317,8 @@ if df_all is not None:
             with ce2:
                 st.markdown("""<div class="report-note">
                 <b>2. 物流模式分析 (平均單次訂單規模)：</b><br>
-                ● <b>意義：</b> 經銷商大宗進貨 (數值高)；直營診所小量多次採購 (數值低)。<br>
-                ● <b>分析重點：</b> 經銷商採購量若過低，代表頻繁報關，行政物流成本過重。
+                ● <b>指標意義：</b> 經銷商大宗採購 (數值高)；直營診所小量多次進貨 (數值低)。<br>
+                ● <b>分析重點：</b> 經銷商單筆採購若過低（如低於 100 支），代表頻繁小包報關，行政物流運費會嚴重侵蝕毛利；過高則需注意代理商庫存效期。
                 </div>""", unsafe_allow_html=True)
                 order_sz = df[df['收費量']>0].groupby(['國家', '商務模式']).agg({'收費量':'sum', '銷貨日期':'count'}).reset_index()
                 order_sz['規模'] = (order_sz['收費量'] / (order_sz['銷貨日期'] + 0.0001)).round(1)
@@ -308,15 +327,13 @@ if df_all is not None:
             st.divider()
             ce3, ce4 = st.columns([2, 1])
             with ce3:
-                # --- 關鍵修正：解決 2.1B 的致命錯誤 ---
                 st.markdown("""<div class="report-note">
-                <b>3. 行銷投資回報 (FOC 轉換效率)：</b><br>
-                ● <b>意義：</b> 每投入 1 支贈針(FOC)，平均換回幾支收費訂單。<br>
-                ● <span class="highlight-text">排除未投入贈針之市場</span>：僅計算有投入 FOC 贈針的國家（如馬來西亞、新加坡、日本、泰國等），數值在 0~15 倍之間，避免除以零產生數十億之荒謬數值。
+                <b>3. 行銷投資回報 (FOC 轉換效率 / 槓桿比)：</b><br>
+                ● <b>指標意義：</b> 每投入 1 支贈針(FOC)，平均帶動幾支收費訂單（評估行銷資源變現力）。<br>
+                ● <b>分析重點：</b> 數值越高代表該國 Workshop、KOL 示範針的轉單能力越強；未投入贈針之純銷售市場（如大陸、歐美）不計入以避免極端值偏差。
                 </div>""", unsafe_allow_html=True)
                 
                 eff_df = df.groupby('國家').agg({'收費量':'sum', 'FOC總量':'sum'}).reset_index()
-                # 僅針對有投入贈針的市場計算槓桿比
                 eff_plot = eff_df[eff_df['FOC總量'] > 0].copy()
                 if not eff_plot.empty:
                     eff_plot['效率'] = (eff_plot['收費量'] / eff_plot['FOC總量']).round(1)
@@ -333,14 +350,15 @@ if df_all is not None:
             with ce4:
                 st.markdown("""<div class="report-note">
                 <b>4. 全球商務模式佔比：</b><br>
-                顯示全球直營診所模式與代理經銷模式的營收結構比例。
+                ● <b>指標意義：</b> 顯示全球營收中「直營診所模式」（台、日）與「代理經銷模式」（大陸、東南亞、歐美）的營收結構。<br>
+                ● <b>分析重點：</b> 評估渠道抗風險能力。直營毛利高但管理重；經銷資金回籠快但話語權依賴度高。
                 </div>""", unsafe_allow_html=True)
                 st.plotly_chart(px.pie(df, names='商務模式', hole=0.5, color_discrete_sequence=['#0984E3', '#00B894'], title="全球模式營收佔比"), use_container_width=True)
 
             st.markdown("""<div class="report-note">
             <b>5. 全球採購季節性熱力圖 (Heatmap)：</b><br>
-            ● <b>意義：</b> 顏色越深代表該月份進貨金額越多。<br>
-            ● <b>分析重點：</b> 追蹤各國大型展會或促銷後的補貨節奏，提早預備庫存與差旅。
+            ● <b>指標意義：</b> 以 1-12 月追蹤各國進貨淡旺季，顏色越深金額越高。<br>
+            ● <b>分析重點：</b> 提早 2~3 個月掌握各國大型展會促銷後的補貨節奏，指導工廠排產、海外出差與庫存調度。
             </div>""", unsafe_allow_html=True)
             heat_df = df.groupby(['國家', '月份'])['金額'].sum().reset_index()
             fig_h = px.density_heatmap(heat_df, x='月份', y='國家', z='金額', color_continuous_scale='Blues', nbinsx=12, range_x=[0.5, 12.5], text_auto='.2s')
