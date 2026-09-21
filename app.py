@@ -27,10 +27,7 @@ st.markdown("""
 def smart_normalize(df):
     if df is None or df.empty or len(df.columns) < 2: return pd.DataFrame()
     
-    # 預抓 BX 備註 (索引 75)
     bx_note = df.iloc[:, 75].astype(str).replace('nan', '') if df.shape[1] >= 76 else None
-    
-    # 清理標題
     df.columns = [str(c).strip().replace('\n', '').replace('\r', '').upper() for c in df.columns]
     
     m = {
@@ -53,7 +50,7 @@ def smart_normalize(df):
 
     p_df = pd.DataFrame()
     
-    # 時間與年度識別
+    # 時間識別
     c_year = find_col('YEAR')
     c_date = find_col('DATE')
     if c_year:
@@ -73,7 +70,7 @@ def smart_normalize(df):
     if p_df.empty: return pd.DataFrame()
     p_df['月份'] = p_df['銷貨日期'].dt.month.fillna(1).astype(int)
 
-    # 嚴格地點識別 (絕不讓診所名稱干擾國家判定)
+    # 嚴格地點識別 (只看地點欄位)
     loc_cols = [c for c in df.columns if any(k in c for k in ['國家', '銷售地', '地區', '路線', '銷售地區', 'COUNTRY', '區域', '省份', '市場', '國別', '銷貨地', '出貨地'])]
     c_cust_col = find_col('CUSTOMER')
     raw_cust = df[c_cust_col].astype(str).loc[p_df.index] if c_cust_col else pd.Series(['']*len(p_df))
@@ -82,13 +79,11 @@ def smart_normalize(df):
         loc_vals = [str(df[c].loc[idx]).strip() for c in loc_cols if pd.notna(df[c].loc[idx]) and str(df[c].loc[idx]).strip() not in ['', 'nan', 'NAN', 'None', 'NONE', '0']]
         loc_raw = " ".join(loc_vals).upper()
         loc_clean = loc_raw.replace(' ', '').replace('　', '').replace('\t', '')
-        
         cust_str = raw_cust.loc[idx].strip()
         cust_up = cust_str.upper()
 
         country = '其他'
 
-        # 地點優先判定
         if any(x in loc_clean for x in ['台灣', '臺灣', 'TAIWAN', 'TW']):
             country = '台灣'
         elif any(x in loc_clean for x in ['大陸', '中國', 'CHINA', 'MAINLAND', '北京', '上海', '廣州', '華東', '華南']):
@@ -108,7 +103,6 @@ def smart_normalize(df):
         elif any(x in loc_clean for x in ['泰國', 'THAILAND', 'TH']):
             country = '泰國'
         else:
-            # 地點欄位完全為空時，才由客戶名稱推測
             if 'VANGUARD' in cust_up:
                 if 'OPC' in cust_up: country = '菲律賓'
                 elif 'SDN' in cust_up: country = '馬來西亞'
@@ -120,7 +114,6 @@ def smart_normalize(df):
             else:
                 country = '台灣' if loc_clean == '' else '其他'
 
-        # 模式與全名指派
         if country == '台灣':
             return '台灣', '台灣市場', '直營診所模式', cust_str if cust_str else '台灣診所'
         elif country == '日本':
@@ -205,9 +198,8 @@ if df_all is not None:
     sel_area = sc1.multiselect("區域", ['台灣市場', '中國市場', '海外市場'], default=['海外市場', '中國市場', '台灣市場'])
     available_countries = sorted(df_all[df_all['市場區域'].isin(sel_area)]['國家'].unique())
     sel_countries = sc3.multiselect("國家", available_countries, default=available_countries)
-    
-    # --- 關鍵修正：年度預設只勾選「最近兩年」，歷史年份保留在選單供勾選 ---
     all_yrs = sorted([int(y) for y in df_all['年度'].unique() if y > 0])
+    # 預設選取最新兩年
     default_yrs = all_yrs[-2:] if len(all_yrs) >= 2 else all_yrs
     sel_yrs = sc2.multiselect("年度", options=all_yrs, default=default_yrs)
 
@@ -233,7 +225,8 @@ if df_all is not None:
         with tabs[0]: 
             st.markdown("""<div class="report-note">
             <b>📊 市場佔比與 YoY 成長趨勢模組：</b><br>
-            ● <b>分析重點：</b> 監控全球各市場營收佔比與年度擴張速度。YoY% 採用財務慣用之「紅漲綠跌」標註，新市場（去年數據為0）顯示為「-」。若特定市場連續兩年衰退，需啟動區域渠道檢討。
+            ● <b>分析重點：</b> 監控全球各市場營收與贈針之佔比與年度走勢。YoY% 採用財務「紅漲綠跌」標註，新市場（去年數據為0）顯示為「-」。<br>
+            💡 <i>提示：若只需分析海外推廣贈針，請於頂部「區域」篩選器取消勾選「台灣市場」即可排除國內樣品單。</i>
             </div>""", unsafe_allow_html=True)
             
             metric_opt = st.selectbox("分析指標", ["金額", "收費量", "FOC總量"])
@@ -247,37 +240,53 @@ if df_all is not None:
             disp = pivot.copy()
             for i in range(1, len(sorted_y)):
                 curr, prev = sorted_y[i], sorted_y[i-1]
-                disp[f"{curr}年 成長%"] = np.where(pivot[prev]==0, np.nan, (pivot[curr]-pivot[prev])/pivot[prev]*100)
+                # 當去年為 0 時，設為 np.nan 方便後續直接轉成 '-'
+                disp[f"{curr}年 成長%"] = np.where(pivot[prev] == 0, np.nan, (pivot[curr] - pivot[prev]) / pivot[prev] * 100)
             
             final_f_cols = []
             col_cfg = {}
-            format_dict = {}
             for y in sorted_y:
                 y_c = f"{int(y)}年"
                 disp = disp.rename(columns={y: y_c})
                 final_f_cols.append(y_c)
-                col_cfg[y_c] = st.column_config.NumberColumn(width=160, format="%,.0f")
-                format_dict[y_c] = "{:,.0f}"
+                col_cfg[y_c] = st.column_config.Column(width=160)
                 
                 g_c = f"{int(y)}年 成長%"
                 if g_c in disp.columns:
                     final_f_cols.append(g_c)
-                    col_cfg[g_c] = st.column_config.TextColumn(width=140)
-                    format_dict[g_c] = lambda v: "-" if (pd.isna(v) or str(v).lower() in ['nan', 'none']) else f"{v:.1f}%"
+                    col_cfg[g_c] = st.column_config.Column(width=140)
 
-            def color_logic(v, n):
-                if '成長%' in str(n) and pd.notna(v) and str(v).lower() not in ['nan', 'none']:
+            # --- 關鍵修正：在 DataFrame 數據層面直接格式化，徹底杜絕 None！ ---
+            formatted_disp = pd.DataFrame(index=disp.index)
+            for col in final_f_cols:
+                if '成長%' in col:
+                    # 成長率：如果是空值或無窮大，顯示 '-'；否則帶 1 位小數與 % 符號
+                    formatted_disp[col] = disp[col].apply(
+                        lambda v: "-" if (pd.isna(v) or str(v).strip().lower() in ['nan', 'none', 'inf', '-inf']) else f"{float(v):.1f}%"
+                    )
+                else:
+                    # 金額/數量：強制帶千分位逗號
+                    formatted_disp[col] = disp[col].apply(
+                        lambda v: f"{int(v):,}" if (pd.notna(v) and str(v).strip().lower() not in ['nan', 'none']) else "0"
+                    )
+
+            # 顏色邏輯：紅色代表成長，綠色代表衰退
+            def color_growth_text(cell_str):
+                s = str(cell_str).strip()
+                if s.endswith('%'):
                     try:
-                        return 'color: #D32F2F; font-weight: bold' if float(v) > 0.001 else 'color: #388E3C; font-weight: bold'
-                    except: return ''
+                        num = float(s.replace('%', ''))
+                        if num > 0.001: return 'color: #D32F2F; font-weight: bold' # 紅漲
+                        if num < -0.001: return 'color: #388E3C; font-weight: bold' # 綠跌
+                    except: pass
                 return ''
-            
+
             st.dataframe(
-                disp[final_f_cols].style.format(format_dict, na_rep="-").apply(lambda x: [color_logic(v, x.name) for v in x], axis=0),
+                formatted_disp.style.applymap(color_growth_text),
                 height=500, use_container_width=False, column_config=col_cfg
             )
 
-        # --- TAB 1: 產品 ---
+        # --- TAB 1: 產品排行 ---
         with tabs[1]: 
             st.markdown("""<div class="report-note">
             <b>🎯 產品競爭力排行模組：</b><br>
@@ -285,7 +294,7 @@ if df_all is not None:
             </div>""", unsafe_allow_html=True)
             st.plotly_chart(px.bar(df.groupby('產品')['金額'].sum().sort_values(ascending=False).reset_index().head(12), x='金額', y='產品', orientation='h', color='金額', title="全球產品銷售排行榜"), use_container_width=True)
 
-        # --- TAB 2: FOC ---
+        # --- TAB 2: FOC 專項分析 ---
         with tabs[2]: 
             st.markdown("""<div class="report-note">
             <b>📉 FOC 贈針資源配置與成本模組：</b><br>
