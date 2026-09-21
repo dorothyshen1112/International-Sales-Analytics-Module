@@ -30,14 +30,13 @@ def smart_normalize(df):
     # 預抓 BX 備註 (索引 75)
     bx_note = df.iloc[:, 75].astype(str).replace('nan', '') if df.shape[1] >= 76 else None
     
-    # 清理標題：去空格、換行、轉大寫
+    # 清理標題
     df.columns = [str(c).strip().replace('\n', '').replace('\r', '').upper() for c in df.columns]
     
-    # [關鍵修正：將「銷售地」加入 COUNTRY 名單中]
     m = {
         'DATE': ['銷貨日期', '單據日期', '日期', 'DATE', '銷貨日期A', '單據日', '成交日期', '開單日期'],
         'YEAR': ['年度', '年', 'YEAR', '年度_1', '年份', '西元年', 'YYYY', 'FISCALYEAR', '會計年度', '西元'],
-        'COUNTRY': ['國家', '銷售地', '銷售地區', '地區', 'COUNTRY', '區域', '廠別名稱', '地  區', '省份', '市場', '國別', '銷貨地', '出貨地', '客戶地址'],
+        'COUNTRY': ['國家', '銷售地', '地區', '路線', '銷售地區', 'COUNTRY', '區域', '廠別名稱', '地  區', '省份', '市場', '國別', '銷貨地', '出貨地', '客戶地址'],
         'CUSTOMER': ['客戶簡稱', '客戶', '客戶名稱', 'CUSTOMER', '送貨客戶全名', '經銷商', '代理商'],
         'PRODUCT': ['品名', '業務品名', '產品名稱', 'PRODUCT', '品號', '業務規格', '品  名', '項目名稱'],
         'QTY': ['銷貨數量', '數量', '計價數量', '總數量', 'QTY', '件數', '出貨數量'],
@@ -74,49 +73,52 @@ def smart_normalize(df):
     if p_df.empty: return pd.DataFrame()
     p_df['月份'] = p_df['銷貨日期'].dt.month.fillna(1).astype(int)
 
-    # 國家與經銷商分類 (已納入「銷售地」欄位)
-    c_country_col = find_col('COUNTRY')
+    # 找出所有與地點相關的欄位，合併文字以供全面掃描
+    loc_cols = [c for c in df.columns if any(k in c for k in ['國家', '銷售地', '地區', '路線', 'COUNTRY', '區域', '省份', '市場', '國別'])]
     c_cust_col = find_col('CUSTOMER')
-    raw_country = df[c_country_col].astype(str).loc[p_df.index] if c_country_col else pd.Series(['']*len(p_df))
     raw_cust = df[c_cust_col].astype(str).loc[p_df.index] if c_cust_col else pd.Series(['']*len(p_df))
 
     def classify_all(idx):
-        c_raw = raw_country.loc[idx].strip()
-        c_up = c_raw.upper()
+        # 收集該行所有地點欄位文字
+        loc_text = " ".join([str(df[c].loc[idx]) for c in loc_cols if str(df[c].loc[idx]) != 'nan']).upper()
         cust_raw = raw_cust.loc[idx].strip()
         cust_up = cust_raw.upper()
-        full_info = c_up + " " + cust_up
+        full_info = loc_text + " " + cust_up
 
-        # 1. 德國
+        # 1. 德國 (獨立於歐美)
         if any(x in full_info for x in ['德國', 'GERMANY', 'DEUTSCHLAND']):
             return '德國', '海外市場', '經銷商模式', cust_raw if cust_raw else '德國經銷商'
 
-        # 2. 日本 (直營診所模式)
+        # 2. 歐美 (捕捉「歐美」、「美國」、「歐洲」等)
+        if any(x in full_info for x in ['歐美', '歐洲', '美洲', '美國', 'USA', 'EUROPE', 'EU', 'AMERICA']):
+            return '歐美', '海外市場', '經銷商模式', cust_raw if cust_raw else '歐美經銷商'
+
+        # 3. 日本 (直營診所模式)
         if any(x in full_info for x in ['日本', 'JAPAN']):
             clean_clinic = re.sub(r'\s*(PTE\.?\s*LTD\.?|SDN\.?\s*BHD\.?|INC\.?|CO\.?|LTD\.?)$', '', cust_up).strip()
             return '日本', '海外市場', '直營診所模式', clean_clinic if clean_clinic else '日本診所'
 
-        # 3. 新加坡 (Vanguard)
+        # 4. 新加坡 (Vanguard)
         if any(x in full_info for x in ['新加坡', 'SINGAPORE']) or ('VANGUARD' in cust_up and 'MALAYSIA' not in full_info and 'PHILIPPINES' not in full_info and '馬來西亞' not in full_info and '菲律賓' not in full_info):
             return '新加坡', '海外市場', '經銷商模式', 'VANGUARD AESTHETICS PTE. LTD.'
 
-        # 4. 菲律賓 (Vanguard)
+        # 5. 菲律賓 (Vanguard)
         if any(x in full_info for x in ['菲律賓', 'PHILIPPINES', 'OPC']):
             return '菲律賓', '海外市場', '經銷商模式', 'VANGUARD AESTHETICS OPC'
 
-        # 5. 馬來西亞 (Vanguard)
+        # 6. 馬來西亞 (Vanguard)
         if any(x in full_info for x in ['馬來西亞', 'MALAYSIA', 'SDN BHD']):
             return '馬來西亞', '海外市場', '經銷商模式', 'Vanguard Aesthetics Sdn Bhd'
 
-        # 6. 泰國 (Qualtech)
+        # 7. 泰國 (Qualtech)
         if any(x in full_info for x in ['泰國', 'THAILAND', 'QUALTECH']):
             return '泰國', '海外市場', '經銷商模式', 'Qualtech Consulting (Thailand)'
 
-        # 7. 台灣 (直營診所模式，保留診所原名)
-        if any(x in c_up for x in ['台灣', '臺灣', 'TAIWAN']) or ('台灣' in cust_up or '臺灣' in cust_up):
+        # 8. 台灣 (直營診所模式，保留診所原名)
+        if any(x in loc_text for x in ['台灣', '臺灣', 'TAIWAN']) or ('台灣' in cust_up or '臺灣' in cust_up):
             return '台灣', '台灣市場', '直營診所模式', cust_raw if cust_raw else '台灣診所'
 
-        # 8. 大陸 (經銷商模式：分為 東莞双美 與 北京享贊 兩間)
+        # 9. 大陸 (經銷商模式：分為 東莞双美 與 北京享贊 兩間)
         if any(x in full_info for x in ['大陸', '中國', 'CHINA', '北京', '上海', '廣州', '華東', '華南', '東莞', '享贊', '享赞']):
             if any(x in cust_up for x in ['東莞', 'DONGGUAN', '双美', '雙美']):
                 return '大陸', '中國市場', '經銷商模式', '東莞双美'
@@ -258,7 +260,7 @@ if df_all is not None:
             if target != "全部 FOC": f_data_view = f_data_view[f_data_view['FOC類別'] == target]
             st.dataframe(f_data_view[['銷貨日期', '國家', '客戶', '產品', '數量', '贈品量', '金額', '備註']], use_container_width=True)
 
-        # --- TAB 3: 營運效率 (完整 5 大模組 + 藍色導覽框) ---
+        # --- TAB 3: 營運效率 (5 大模組 + 藍色引航說明永久固定) ---
         with tabs[3]:
             st.subheader("⚡ 全球營運效率與模式深度解析")
             
@@ -266,8 +268,8 @@ if df_all is not None:
             with ce1:
                 st.markdown("""<div class="report-note">
                 <b>1. 市場滲透度分析 (活躍客戶數)：</b><br>
-                ● <b>意義：</b> 日本與台灣為「直營診所模式」，顯示開發出的診所總數；經銷商市場應為 1~2 間。<br>
-                ● <b>經銷商市場：</b> 大陸包含「北京享贊」與「東莞双美」共 2 間經銷商；東南亞各國與德國各為 1 間。
+                ● <b>意義：</b> 日本與台灣為「直營診所模式」，數值越高代表開發出的診所越多。<br>
+                ● <b>經銷商市場：</b> 大陸包含「北京享贊」與「東莞双美」共 2 間經銷商；東南亞、德國與歐美經銷商各為 1 間。
                 </div>""", unsafe_allow_html=True)
                 active_c = df.groupby(['國家', '商務模式'])['客戶'].nunique().reset_index().sort_values('客戶', ascending=False)
                 st.plotly_chart(px.bar(active_c, x='國家', y='客戶', color='商務模式', title="活躍客戶/診所總數", text_auto=True), use_container_width=True)
