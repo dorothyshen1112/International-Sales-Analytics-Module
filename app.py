@@ -73,14 +73,12 @@ def smart_normalize(df):
     if p_df.empty: return pd.DataFrame()
     p_df['月份'] = p_df['銷貨日期'].dt.month.fillna(1).astype(int)
 
-    # 找出所有與「地點」相關的欄位
+    # 嚴格地點識別 (只看地點欄位，絕不讓診所名稱影響國家判定)
     loc_cols = [c for c in df.columns if any(k in c for k in ['國家', '銷售地', '地區', '路線', '銷售地區', 'COUNTRY', '區域', '省份', '市場', '國別', '銷貨地', '出貨地'])]
     c_cust_col = find_col('CUSTOMER')
     raw_cust = df[c_cust_col].astype(str).loc[p_df.index] if c_cust_col else pd.Series(['']*len(p_df))
 
-    # --- 核心重構：嚴格只用「地點欄位」判定國別，客戶名稱絕不能干擾國家！ ---
     def classify_strictly(idx):
-        # 1. 僅提取地點相關欄位的字串
         loc_vals = [str(df[c].loc[idx]).strip() for c in loc_cols if pd.notna(df[c].loc[idx]) and str(df[c].loc[idx]).strip() not in ['', 'nan', 'NAN', 'None', 'NONE', '0']]
         loc_raw = " ".join(loc_vals).upper()
         loc_clean = loc_raw.replace(' ', '').replace('　', '').replace('\t', '')
@@ -90,7 +88,6 @@ def smart_normalize(df):
 
         country = '其他'
 
-        # 地點判定優先順序：
         if any(x in loc_clean for x in ['台灣', '臺灣', 'TAIWAN', 'TW']):
             country = '台灣'
         elif any(x in loc_clean for x in ['大陸', '中國', 'CHINA', 'MAINLAND', '北京', '上海', '廣州', '華東', '華南']):
@@ -110,7 +107,6 @@ def smart_normalize(df):
         elif any(x in loc_clean for x in ['泰國', 'THAILAND', 'TH']):
             country = '泰國'
         else:
-            # 僅當地點欄位「完全為空」時，才容許從客戶名稱推測海外經銷商
             if 'VANGUARD' in cust_up:
                 if 'OPC' in cust_up: country = '菲律賓'
                 elif 'SDN' in cust_up: country = '馬來西亞'
@@ -122,14 +118,13 @@ def smart_normalize(df):
             else:
                 country = '台灣' if loc_clean == '' else '其他'
 
-        # 2. 根據判定的國家，決定市場區域、模式與標準客戶名稱
+        # 模式與客戶全名歸類
         if country == '台灣':
             return '台灣', '台灣市場', '直營診所模式', cust_str if cust_str else '台灣診所'
         elif country == '日本':
             clean_clinic = re.sub(r'\s*(PTE\.?\s*LTD\.?|SDN\.?\s*BHD\.?|INC\.?|CO\.?|LTD\.?)$', '', cust_up).strip()
             return '日本', '海外市場', '直營診所模式', clean_clinic if clean_clinic else '日本診所'
         elif country == '大陸':
-            # 大陸經銷商 2 間
             if any(k in cust_up for k in ['東莞', 'DONGGUAN', '双美', '雙美']):
                 return '大陸', '中國市場', '經銷商模式', '東莞双美'
             else:
@@ -164,7 +159,7 @@ def smart_normalize(df):
     p_df['金額'] = to_num('AMOUNT')
     p_df['備註'] = bx_note.loc[p_df.index].values if bx_note is not None else (df[find_col('NOTE')].loc[p_df.index].astype(str).replace('nan', '') if find_col('NOTE') else "")
 
-    # FOC 計算 (金額 > 0 的絕非 FOC)
+    # FOC 計算
     p_df['實際FOC數量'] = np.where((p_df['金額'] <= 0) & (p_df['數量'] > 0), p_df['數量'], 0.0) + p_df['贈品量']
     p_df.loc[p_df['金額'] > 0, '實際FOC數量'] = 0.0
     
@@ -282,7 +277,7 @@ if df_all is not None:
             if target != "全部 FOC": f_data_view = f_data_view[f_data_view['FOC類別'] == target]
             st.dataframe(f_data_view[['銷貨日期', '國家', '客戶', '產品', '數量', '贈品量', '金額', '備註']], use_container_width=True)
 
-        # --- TAB 3: 營運效率 (5 大模組 + 藍色引航說明永久固定) ---
+        # --- TAB 3: 營運效率 (徹底修復 21 億異常數值) ---
         with tabs[3]:
             st.subheader("⚡ 全球營運效率與模式深度解析")
             
@@ -290,7 +285,7 @@ if df_all is not None:
             with ce1:
                 st.markdown("""<div class="report-note">
                 <b>1. 市場滲透度分析 (活躍客戶數)：</b><br>
-                ● <b>直營診所模式：</b> 日本與台灣顯示實際開拓的診所總數量（包含台灣各地皮膚科/醫美診所）。<br>
+                ● <b>直營診所模式：</b> 日本與台灣顯示實際開拓的診所總數量。<br>
                 ● <b>經銷商模式：</b> 大陸包含「北京享贊」與「東莞双美」共 2 間；東南亞各國、德國與歐美經銷商各為 1 間。
                 </div>""", unsafe_allow_html=True)
                 active_c = df.groupby(['國家', '商務模式'])['客戶'].nunique().reset_index().sort_values('客戶', ascending=False)
@@ -313,14 +308,27 @@ if df_all is not None:
             st.divider()
             ce3, ce4 = st.columns([2, 1])
             with ce3:
+                # --- 關鍵修正：解決 2.1B 的致命錯誤 ---
                 st.markdown("""<div class="report-note">
                 <b>3. 行銷投資回報 (FOC 轉換效率)：</b><br>
                 ● <b>意義：</b> 每投入 1 支贈針(FOC)，平均換回幾支收費訂單。<br>
-                ● <b>分析重點：</b> 評估各國 Workshop、示範針的實質「轉單變現力」。
+                ● <span class="highlight-text">排除未投入贈針之市場</span>：僅計算有投入 FOC 贈針的國家（如馬來西亞、新加坡、日本、泰國等），數值在 0~15 倍之間，避免除以零產生數十億之荒謬數值。
                 </div>""", unsafe_allow_html=True)
+                
                 eff_df = df.groupby('國家').agg({'收費量':'sum', 'FOC總量':'sum'}).reset_index()
-                eff_df['效率'] = (eff_df['收費量'] / (eff_df['FOC總量'] + 0.001)).round(1)
-                st.plotly_chart(px.bar(eff_df.sort_values('效率', ascending=False), x='國家', y='效率', title="行銷槓桿比 (1支FOC換回幾張訂單)", color='效率', text_auto=True), use_container_width=True)
+                # 僅針對有投入贈針的市場計算槓桿比
+                eff_plot = eff_df[eff_df['FOC總量'] > 0].copy()
+                if not eff_plot.empty:
+                    eff_plot['效率'] = (eff_plot['收費量'] / eff_plot['FOC總量']).round(1)
+                    fig_eff = px.bar(eff_plot.sort_values('效率', ascending=False), x='國家', y='效率', 
+                                     title="行銷槓桿比 (每投入1支FOC換回幾支收費針)", color='效率', text_auto=True)
+                    st.plotly_chart(fig_eff, use_container_width=True)
+                else:
+                    st.info("💡 所選條件下無 FOC 贈針投入記錄。")
+                
+                with st.expander("📝 點此查看全市場 FOC 與收費量真實對照表"):
+                    eff_df['槓桿比(倍)'] = np.where(eff_df['FOC總量'] > 0, (eff_df['收費量'] / eff_df['FOC總量']).round(1), 0.0)
+                    st.dataframe(eff_df.rename(columns={'收費量':'收費量(支)', 'FOC總量':'贈針數(支)'}), use_container_width=True)
 
             with ce4:
                 st.markdown("""<div class="report-note">
